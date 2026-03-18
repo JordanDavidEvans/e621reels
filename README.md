@@ -5,9 +5,10 @@ A Cloudflare Worker site that turns e621's public API into an Instagram Reels-st
 ## Features
 
 - Defaults to a trending/popular animated feed using `order:rank animated` on the e621 API.
-- Instagram-inspired fullscreen UI with overlay controls.
-- Advances automatically after roughly 10 seconds, or sooner when a video ends.
+- Instagram-inspired fullscreen UI with vertical swipe navigation and animated auto-advance transitions.
+- Lets videos play fully before auto-advancing, while images still advance after roughly 10 seconds.
 - Lets users switch to score-based sorting, add tags, and filter by rating.
+- Includes an almost-transparent settings cog with optional fit-media and hide-tags display toggles.
 - Ships as a single Worker with no extra Cloudflare bindings or dashboard changes required.
 
 ## Local development
