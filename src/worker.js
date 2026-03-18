@@ -1,9 +1,11 @@
 const E621_API = 'https://e621.net/posts.json';
+const E621_TAG_AUTOCOMPLETE_API = 'https://e621.net/tags/autocomplete.json';
 const USER_AGENT = 'e621reels/0.1.0 (Cloudflare Worker demo; contact: admin@example.com)';
 const PAGE_SIZE = 24;
 const BASE_TAGS = ['animated'];
 const SUPPORTED_MEDIA = new Set(['webm', 'mp4', 'gif']);
 const UPSTREAM_ERROR_PREVIEW_LIMIT = 400;
+const TAG_AUTOCOMPLETE_LIMIT = 8;
 
 export default {
   async fetch(request) {
@@ -11,6 +13,10 @@ export default {
 
     if (url.pathname === '/api/posts') {
       return handlePosts(request, url);
+    }
+
+    if (url.pathname === '/api/tags/autocomplete') {
+      return handleTagAutocomplete(request, url);
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
@@ -39,7 +45,7 @@ async function handlePosts(request, url) {
     mode === 'score' ? 'order:score' : 'order:rank',
     ...BASE_TAGS,
     ...rawTags,
-    ...(requestedRating ? [`rating:${requestedRating}`] : []),
+    ...(requestedRating ? ['rating:' + requestedRating] : []),
   ].join(' ');
 
   const upstream = new URL(E621_API);
@@ -124,6 +130,95 @@ async function handlePosts(request, url) {
   }
 }
 
+async function handleTagAutocomplete(request, url) {
+  if (request.method !== 'GET') {
+    return json({ error: 'Method not allowed' }, 405);
+  }
+
+  const rawQuery = String(url.searchParams.get('q') || '');
+  const query = sanitizeAutocompleteQuery(rawQuery);
+
+  if (!query) {
+    return json({ query: '', tags: [] });
+  }
+
+  const upstream = new URL(E621_TAG_AUTOCOMPLETE_API);
+  upstream.searchParams.set('search[name_matches]', query + '*');
+
+  const requestMeta = {
+    query,
+    upstream: upstream.toString(),
+    ray: request.headers.get('cf-ray') || null,
+    colo: request.cf?.colo || null,
+  };
+
+  try {
+    const response = await fetch(upstream, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+      cf: {
+        cacheTtl: 180,
+        cacheEverything: false,
+      },
+    });
+
+    if (!response.ok) {
+      const upstreamBody = trimForLog(await response.text());
+      console.error('e621 tag autocomplete returned a non-OK response', {
+        ...requestMeta,
+        upstreamStatus: response.status,
+        upstreamStatusText: response.statusText,
+        upstreamBody,
+      });
+
+      return json(
+        {
+          error: 'Failed to fetch tag autocomplete',
+          status: response.status,
+          upstreamStatusText: response.statusText,
+          details: upstreamBody,
+          requestMeta,
+        },
+        502,
+      );
+    }
+
+    const data = await response.json();
+    const tags = Array.isArray(data)
+      ? data
+          .filter((tag) => tag && typeof tag.name === 'string')
+          .slice(0, TAG_AUTOCOMPLETE_LIMIT)
+          .map((tag) => ({
+            id: tag.id || null,
+            name: tag.name,
+            category: Number.isFinite(tag.category) ? tag.category : null,
+            postCount: Number.isFinite(tag.post_count) ? tag.post_count : 0,
+            antecedentName: tag.antecedent_name || null,
+          }))
+      : [];
+
+    return json({ query, tags, source: 'worker' });
+  } catch (error) {
+    console.error('e621 tag autocomplete threw an exception', {
+      ...requestMeta,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : null,
+    });
+
+    return json(
+      {
+        error: 'Failed to fetch tag autocomplete',
+        status: 0,
+        details: error instanceof Error ? error.message : String(error),
+        requestMeta,
+      },
+      502,
+    );
+  }
+}
+
 function trimForLog(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, UPSTREAM_ERROR_PREVIEW_LIMIT);
 }
@@ -147,14 +242,14 @@ function mapPost(post) {
     createdAt: post.created_at,
     mediaUrl: post.file.url,
     previewUrl: post.preview?.url || post.sample?.url || post.file.url,
-    sourceUrl: `https://e621.net/posts/${post.id}`,
+    sourceUrl: 'https://e621.net/posts/' + post.id,
     description: [
-      artist.length ? `Artist: ${artist.join(', ')}` : 'Artist unknown',
-      species.length ? `Species: ${species.slice(0, 3).join(', ')}` : null,
+      artist.length ? 'Artist: ' + artist.join(', ') : 'Artist unknown',
+      species.length ? 'Species: ' + species.slice(0, 3).join(', ') : null,
     ]
       .filter(Boolean)
       .join(' • '),
-    tags: [...artist.map((tag) => `artist:${tag}`), ...general],
+    tags: [...artist.map((tag) => 'artist:' + tag), ...general],
   };
 }
 
@@ -310,7 +405,9 @@ function renderApp() {
       .field-help,
       .tagline,
       .counter,
-      .swipe-hint {
+      .swipe-hint,
+      .autocomplete-meta,
+      .autocomplete-empty {
         color: var(--muted);
       }
       .badge-row {
@@ -418,102 +515,175 @@ function renderApp() {
       .progress > div {
         height: 100%;
         width: 0;
-        background: linear-gradient(90deg, #ff2f78, #ffa34d);
-        transition: width 120ms linear;
+        background: linear-gradient(90deg, #ff59a0 0%, #ffd36b 100%);
+        transition: width 100ms linear;
       }
       .settings-toggle {
         position: absolute;
-        right: 14px;
-        top: calc(var(--safe-top) + 54px);
+        right: 16px;
+        top: calc(var(--safe-top) + 58px);
         z-index: 5;
       }
       .filter-panel {
         position: absolute;
-        inset: auto 14px 16px 14px;
+        top: 74px;
+        right: 12px;
+        left: 12px;
         z-index: 6;
-        padding: 16px;
-        border-radius: 24px;
         border: 1px solid var(--outline);
         background: var(--panel-strong);
-        backdrop-filter: blur(20px);
-        display: none;
-        gap: 12px;
-        max-height: min(70vh, 620px);
-        overflow: auto;
-      }
-      .filter-panel.open { display: grid; }
-      .filter-panel h3 {
-        margin: 0;
-        font-size: 1rem;
-      }
-      .filter-panel label,
-      .settings-option {
+        backdrop-filter: blur(24px);
+        border-radius: 24px;
+        padding: 18px;
         display: grid;
-        gap: 6px;
+        gap: 14px;
+        transform: translateY(-12px) scale(0.98);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 140ms ease, transform 180ms ease;
+      }
+      .filter-panel.open {
+        transform: translateY(0) scale(1);
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .filter-panel h3 {
+        margin: 0 0 4px;
+      }
+      .filter-panel label {
+        display: grid;
+        gap: 8px;
       }
       .filter-panel input,
-      .filter-panel select {
-        border-radius: 14px;
-        border: 1px solid var(--outline);
+      .filter-panel select,
+      .filter-panel button {
+        border: 1px solid rgba(255,255,255,0.14);
         background: rgba(255,255,255,0.06);
         color: var(--text);
+        border-radius: 14px;
         padding: 12px 14px;
-        outline: none;
+      }
+      .filter-panel input::placeholder {
+        color: rgba(255,255,255,0.42);
       }
       .settings-option {
         grid-template-columns: auto 1fr;
         align-items: center;
-        gap: 10px;
+        gap: 12px;
       }
       .settings-option input {
-        inline-size: 18px;
-        block-size: 18px;
-        margin: 0;
+        width: 20px;
+        height: 20px;
+        padding: 0;
       }
-      .filter-actions {
-        display: flex;
-        gap: 10px;
-      }
-      .filter-actions button,
-      .jump button {
-        flex: 1;
-        border: none;
-        border-radius: 14px;
-        padding: 12px 14px;
-        cursor: pointer;
-      }
-      .primary {
-        background: linear-gradient(135deg, #ff2f78, #ff7b54);
-        color: white;
-      }
-      .secondary {
-        background: rgba(255,255,255,0.08);
-        color: var(--text);
-      }
+      .filter-actions,
       .jump {
         display: flex;
         gap: 10px;
       }
+      .filter-actions > *,
+      .jump > * {
+        flex: 1;
+      }
+      .primary,
+      .secondary {
+        cursor: pointer;
+      }
+      .primary {
+        background: linear-gradient(135deg, #ff4d98 0%, #ff7b4d 100%);
+        border: none;
+      }
+      .secondary {
+        background: rgba(255,255,255,0.08);
+      }
       .meta.hidden-tags #tagList {
         display: none;
       }
-      .sr-only {
+      .field-help,
+      .hint {
+        font-size: 0.87rem;
+        line-height: 1.45;
+      }
+      .input-with-autocomplete {
+        position: relative;
+      }
+      .autocomplete {
         position: absolute;
-        width: 1px;
-        height: 1px;
-        padding: 0;
-        margin: -1px;
+        left: 0;
+        right: 0;
+        top: calc(100% + 8px);
+        z-index: 7;
+        border: 1px solid var(--outline);
+        border-radius: 16px;
+        background: rgba(10, 10, 14, 0.96);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
         overflow: hidden;
-        clip: rect(0, 0, 0, 0);
-        white-space: nowrap;
+      }
+      .autocomplete[hidden] {
+        display: none;
+      }
+      .autocomplete-list {
+        display: grid;
+      }
+      .autocomplete-option,
+      .autocomplete-empty {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 10px;
+        align-items: center;
+        width: 100%;
+        padding: 12px 14px;
         border: 0;
+        border-top: 1px solid rgba(255,255,255,0.06);
+        background: transparent;
+        color: var(--text);
+        text-align: left;
       }
-      a.source-link {
-        color: #fff;
-        text-decoration: none;
+      .autocomplete-option:first-child,
+      .autocomplete-empty:first-child {
+        border-top: 0;
       }
-      @media (max-width: 520px) {
-        .shell { padding: 0; }
+      .autocomplete-option.active,
+      .autocomplete-option:hover,
+      .autocomplete-option:focus-visible {
+        background: rgba(255,255,255,0.08);
+        outline: none;
+      }
+      .autocomplete-tag {
+        overflow: hidden;
+      }
+      .autocomplete-name {
+        font-weight: 600;
+      }
+      .autocomplete-meta {
+        font-size: 0.78rem;
+        margin-top: 2px;
+      }
+      .autocomplete-empty {
+        grid-template-columns: 1fr;
+      }
+      .autocomplete-category {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #666;
+      }
+      .autocomplete-category[data-category="0"] { background: #b9b9b9; }
+      .autocomplete-category[data-category="1"] { background: #e7c94e; }
+      .autocomplete-category[data-category="3"] { background: #53b45e; }
+      .autocomplete-category[data-category="4"] { background: #f28b51; }
+      .autocomplete-category[data-category="5"] { background: #5f9bff; }
+      .autocomplete-category[data-category="6"] { background: #b36df6; }
+      .autocomplete-count {
+        font-size: 0.78rem;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      @media (max-width: 640px) {
+        .shell {
+          padding: 0;
+        }
         .app {
           width: 100%;
           height: 100vh;
@@ -587,7 +757,12 @@ function renderApp() {
           </label>
           <label>
             <span>Tags</span>
-            <input id="tagsInput" name="tags" type="text" placeholder="wolf animated" autocomplete="off" />
+            <div class="input-with-autocomplete">
+              <input id="tagsInput" name="tags" type="text" placeholder="wolf animated" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-autocomplete="list" aria-controls="tagAutocomplete" aria-expanded="false" />
+              <div class="autocomplete" id="tagAutocomplete" hidden>
+                <div class="autocomplete-list" id="tagAutocompleteList"></div>
+              </div>
+            </div>
           </label>
           <label>
             <span>Rating</span>
@@ -617,10 +792,16 @@ function renderApp() {
 
     <script>
       const CLIENT_E621_API = 'https://e621.net/posts.json';
+      const CLIENT_E621_TAG_AUTOCOMPLETE_API = 'https://e621.net/tags/autocomplete.json';
       const CLIENT_SUPPORTED_MEDIA = new Set(['webm', 'mp4', 'gif']);
       const SWIPE_THRESHOLD = 90;
+      const DRAG_LOCK_THRESHOLD = 12;
+      const TAP_DISTANCE_THRESHOLD = 10;
+      const WHEEL_THRESHOLD = 8;
       const PRELOAD_DISTANCE = 2;
       const IMAGE_COUNTDOWN_MS = 10000;
+      const TAG_AUTOCOMPLETE_LIMIT = 8;
+      const AUTOCOMPLETE_DEBOUNCE_MS = 160;
 
       const state = {
         posts: [],
@@ -637,14 +818,29 @@ function renderApp() {
         fitMedia: false,
         hideTags: false,
         touchActive: false,
+        gesturePointerId: null,
+        gestureSource: null,
+        dragLocked: false,
         pointerStartY: 0,
+        pointerStartX: 0,
         pointerDeltaY: 0,
+        pointerDeltaX: 0,
         currentMedia: null,
         currentSlide: null,
         preloaded: new Map(),
         lastFeedSource: 'worker',
+        suppressClickUntil: 0,
+        tagAutocomplete: {
+          items: [],
+          activeIndex: -1,
+          open: false,
+          requestId: 0,
+          debounceTimer: null,
+          query: '',
+        },
       };
 
+      const appRoot = document.getElementById('appRoot');
       const viewport = document.getElementById('viewport');
       const reelTrack = document.getElementById('reelTrack');
       const metaBlock = document.getElementById('metaBlock');
@@ -669,14 +865,21 @@ function renderApp() {
       const toggleMuteButton = document.getElementById('toggleMuteButton');
       const fitMediaToggle = document.getElementById('fitMediaToggle');
       const hideTagsToggle = document.getElementById('hideTagsToggle');
+      const tagAutocomplete = document.getElementById('tagAutocomplete');
+      const tagAutocompleteList = document.getElementById('tagAutocompleteList');
 
       toggleFiltersButton.addEventListener('click', () => {
-        filterPanel.classList.toggle('open');
-        toggleFiltersButton.classList.toggle('active', filterPanel.classList.contains('open'));
+        const nextOpen = !filterPanel.classList.contains('open');
+        filterPanel.classList.toggle('open', nextOpen);
+        toggleFiltersButton.classList.toggle('active', nextOpen);
+        if (!nextOpen) {
+          closeTagAutocomplete();
+        }
       });
 
       filterPanel.addEventListener('submit', async (event) => {
         event.preventDefault();
+        closeTagAutocomplete();
         state.mode = modeSelect.value;
         state.tags = tagsInput.value.trim();
         state.rating = ratingSelect.value;
@@ -698,6 +901,7 @@ function renderApp() {
         state.rating = '';
         state.fitMedia = false;
         state.hideTags = false;
+        closeTagAutocomplete();
         syncDisplaySettings();
         closeSettings();
         await restartFeed();
@@ -718,7 +922,36 @@ function renderApp() {
         toggleMuteButton.textContent = state.muted ? '🔇' : '🔊';
       });
 
+      tagsInput.addEventListener('input', () => scheduleTagAutocomplete());
+      tagsInput.addEventListener('focus', () => scheduleTagAutocomplete(true));
+      tagsInput.addEventListener('blur', () => {
+        window.setTimeout(() => {
+          if (!tagAutocomplete.contains(document.activeElement)) {
+            closeTagAutocomplete();
+          }
+        }, 120);
+      });
+      tagsInput.addEventListener('keydown', handleAutocompleteKeydown);
+      tagAutocomplete.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+      });
+      tagAutocomplete.addEventListener('click', (event) => {
+        const option = event.target.closest('[data-tag-name]');
+        if (!option) return;
+        applyAutocompleteTag(option.getAttribute('data-tag-name'));
+      });
+
+      document.addEventListener('click', (event) => {
+        if (!filterPanel.contains(event.target) && !toggleFiltersButton.contains(event.target)) {
+          closeSettings();
+        }
+        if (!filterPanel.contains(event.target)) {
+          closeTagAutocomplete();
+        }
+      });
+
       document.addEventListener('keydown', (event) => {
+        if (event.target === tagsInput) return;
         if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
           goToRelativePost(1);
         } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
@@ -734,14 +967,19 @@ function renderApp() {
           syncDisplaySettings();
         } else if (event.key === 'Escape') {
           closeSettings();
+          closeTagAutocomplete();
         }
       });
 
-      viewport.addEventListener('pointerdown', handlePointerDown);
-      viewport.addEventListener('pointermove', handlePointerMove);
-      viewport.addEventListener('pointerup', handlePointerUp);
-      viewport.addEventListener('pointercancel', cancelPointerGesture);
-      viewport.addEventListener('wheel', handleWheel, { passive: false });
+      appRoot.addEventListener('pointerdown', handlePointerDown, { capture: true });
+      appRoot.addEventListener('pointermove', handlePointerMove, { capture: true });
+      appRoot.addEventListener('pointerup', handlePointerUp, { capture: true });
+      appRoot.addEventListener('pointercancel', cancelPointerGesture, { capture: true });
+      appRoot.addEventListener('touchstart', handleTouchStart, { passive: false, capture: true });
+      appRoot.addEventListener('touchmove', handleTouchMove, { passive: false, capture: true });
+      appRoot.addEventListener('touchend', handleTouchEnd, { passive: false, capture: true });
+      appRoot.addEventListener('touchcancel', cancelPointerGesture, { passive: false, capture: true });
+      appRoot.addEventListener('wheel', handleWheel, { passive: false });
 
       function closeSettings() {
         filterPanel.classList.remove('open');
@@ -752,36 +990,121 @@ function renderApp() {
         metaBlock.classList.toggle('hidden-tags', state.hideTags);
       }
 
-      function handlePointerDown(event) {
-        if (state.animationLock) return;
-        if (filterPanel.contains(event.target) || toggleFiltersButton.contains(event.target)) return;
+      function shouldIgnoreGestureTarget(target) {
+        if (!target) return false;
+        if (filterPanel.classList.contains('open') && filterPanel.contains(target)) return true;
+        return Boolean(target.closest('button, a, input, select, option, label, textarea, [data-tag-name]'));
+      }
+
+      function beginGesture(point, source, event) {
+        if (state.animationLock) return false;
+        if (filterPanel.contains(event.target) || toggleFiltersButton.contains(event.target)) return false;
+        if (shouldIgnoreGestureTarget(event.target)) return false;
         state.touchActive = true;
-        state.pointerStartY = event.clientY;
+        state.gesturePointerId = point.identifier ?? event.pointerId ?? null;
+        state.gestureSource = source;
+        state.pointerStartY = point.clientY;
+        state.pointerStartX = point.clientX;
         state.pointerDeltaY = 0;
+        state.pointerDeltaX = 0;
+        state.dragLocked = false;
         reelTrack.classList.remove('animating');
-        viewport.setPointerCapture(event.pointerId);
+        return true;
+      }
+
+      function updateGesture(point) {
+        if (!state.touchActive || state.animationLock) return false;
+        state.pointerDeltaY = point.clientY - state.pointerStartY;
+        state.pointerDeltaX = point.clientX - state.pointerStartX;
+        if (!state.dragLocked) {
+          if (Math.abs(state.pointerDeltaY) < DRAG_LOCK_THRESHOLD) return false;
+          if (Math.abs(state.pointerDeltaX) > Math.abs(state.pointerDeltaY)) {
+            cancelPointerGesture();
+            return false;
+          }
+          state.dragLocked = true;
+        }
+        updateTrackForDrag(state.pointerDeltaY);
+        return true;
+      }
+
+      function endGesture() {
+        if (!state.touchActive) return;
+        finalizeSwipe(state.pointerDeltaY, state.dragLocked);
+      }
+
+      function handlePointerDown(event) {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        if (!beginGesture(event, 'pointer', event)) return;
+        if (typeof appRoot.setPointerCapture === 'function') {
+          try {
+            appRoot.setPointerCapture(event.pointerId);
+          } catch (error) {
+            console.warn('Pointer capture failed', error);
+          }
+        }
       }
 
       function handlePointerMove(event) {
-        if (!state.touchActive || state.animationLock) return;
-        state.pointerDeltaY = event.clientY - state.pointerStartY;
-        updateTrackForDrag(state.pointerDeltaY);
+        if (!state.touchActive || state.gestureSource !== 'pointer') return;
+        if (state.gesturePointerId !== null && event.pointerId !== state.gesturePointerId) return;
+        if (updateGesture(event)) {
+          event.preventDefault();
+        }
       }
 
       function handlePointerUp(event) {
-        if (!state.touchActive) return;
-        viewport.releasePointerCapture(event.pointerId);
-        finalizeSwipe(state.pointerDeltaY);
+        if (!state.touchActive || state.gestureSource !== 'pointer') return;
+        if (state.gesturePointerId !== null && event.pointerId !== state.gesturePointerId) return;
+        if (typeof appRoot.releasePointerCapture === 'function') {
+          try {
+            appRoot.releasePointerCapture(event.pointerId);
+          } catch (error) {
+            console.warn('Pointer release failed', error);
+          }
+        }
+        endGesture();
+      }
+
+      function handleTouchStart(event) {
+        if (!event.changedTouches.length) return;
+        beginGesture(event.changedTouches[0], 'touch', event);
+      }
+
+      function handleTouchMove(event) {
+        if (!state.touchActive || state.gestureSource !== 'touch') return;
+        const touch = findActiveTouch(event.changedTouches);
+        if (!touch) return;
+        if (updateGesture(touch)) {
+          event.preventDefault();
+        }
+      }
+
+      function handleTouchEnd(event) {
+        if (!state.touchActive || state.gestureSource !== 'touch') return;
+        const touch = findActiveTouch(event.changedTouches);
+        if (!touch) return;
+        event.preventDefault();
+        endGesture();
+      }
+
+      function findActiveTouch(touchList) {
+        for (const touch of touchList) {
+          if (state.gesturePointerId === null || touch.identifier === state.gesturePointerId) {
+            return touch;
+          }
+        }
+        return null;
       }
 
       function cancelPointerGesture() {
         if (!state.touchActive) return;
-        finalizeSwipe(0);
+        finalizeSwipe(0, false);
       }
 
       function handleWheel(event) {
         if (filterPanel.classList.contains('open') || state.animationLock) return;
-        if (Math.abs(event.deltaY) < 8) return;
+        if (Math.abs(event.deltaY) < WHEEL_THRESHOLD) return;
         event.preventDefault();
         goToRelativePost(event.deltaY > 0 ? 1 : -1);
       }
@@ -792,14 +1115,223 @@ function renderApp() {
         ensureAdjacentSlides();
       }
 
-      function finalizeSwipe(deltaY) {
+      function finalizeSwipe(deltaY, hasDragged = true) {
+        const wasDragging = hasDragged && Math.abs(deltaY) >= DRAG_LOCK_THRESHOLD;
         state.touchActive = false;
-        const direction = deltaY <= -SWIPE_THRESHOLD ? 1 : deltaY >= SWIPE_THRESHOLD ? -1 : 0;
+        state.dragLocked = false;
+        state.gesturePointerId = null;
+        state.gestureSource = null;
+        const direction = wasDragging && deltaY <= -SWIPE_THRESHOLD ? 1 : wasDragging && deltaY >= SWIPE_THRESHOLD ? -1 : 0;
+        if (wasDragging) {
+          state.suppressClickUntil = Date.now() + 400;
+        }
         if (direction === 0) {
           animateTrackTo(0);
           return;
         }
         goToRelativePost(direction, { animated: true });
+      }
+
+      function scheduleTagAutocomplete(runImmediately = false) {
+        if (state.tagAutocomplete.debounceTimer) {
+          clearTimeout(state.tagAutocomplete.debounceTimer);
+          state.tagAutocomplete.debounceTimer = null;
+        }
+        if (runImmediately) {
+          updateTagAutocomplete();
+          return;
+        }
+        state.tagAutocomplete.debounceTimer = setTimeout(updateTagAutocomplete, AUTOCOMPLETE_DEBOUNCE_MS);
+      }
+
+      async function updateTagAutocomplete() {
+        const token = getActiveTagToken(tagsInput.value);
+        state.tagAutocomplete.query = token;
+        if (!token) {
+          closeTagAutocomplete();
+          return;
+        }
+        const requestId = ++state.tagAutocomplete.requestId;
+        try {
+          const items = await fetchTagAutocomplete(token);
+          if (requestId !== state.tagAutocomplete.requestId) return;
+          state.tagAutocomplete.items = items;
+          state.tagAutocomplete.activeIndex = items.length ? 0 : -1;
+          renderTagAutocomplete();
+        } catch (error) {
+          console.warn('Tag autocomplete failed', error);
+          if (requestId !== state.tagAutocomplete.requestId) return;
+          state.tagAutocomplete.items = [];
+          state.tagAutocomplete.activeIndex = -1;
+          renderTagAutocomplete('Could not load tag suggestions right now.');
+        }
+      }
+
+      async function fetchTagAutocomplete(query) {
+        const workerUrl = '/api/tags/autocomplete?q=' + encodeURIComponent(query);
+        try {
+          const workerResponse = await fetch(workerUrl);
+          const workerPayload = await parseJsonSafely(workerResponse);
+          if (workerResponse.ok && workerPayload && Array.isArray(workerPayload.tags)) {
+            return workerPayload.tags;
+          }
+        } catch (error) {
+          console.warn('Worker tag autocomplete failed', error);
+        }
+
+        const upstreamUrl = new URL(CLIENT_E621_TAG_AUTOCOMPLETE_API);
+        upstreamUrl.searchParams.set('search[name_matches]', query + '*');
+        const response = await fetch(upstreamUrl.toString(), {
+          headers: { Accept: 'application/json' },
+        });
+        const payload = await parseJsonSafely(response);
+        if (!response.ok) {
+          throw createFetchError('Direct tag autocomplete failed', {
+            url: upstreamUrl.toString(),
+            status: response.status,
+            payload,
+          });
+        }
+        return Array.isArray(payload)
+          ? payload
+              .filter((tag) => tag && typeof tag.name === 'string')
+              .slice(0, TAG_AUTOCOMPLETE_LIMIT)
+              .map((tag) => ({
+                id: tag.id || null,
+                name: tag.name,
+                category: Number.isFinite(tag.category) ? tag.category : null,
+                postCount: Number.isFinite(tag.post_count) ? tag.post_count : 0,
+                antecedentName: tag.antecedent_name || null,
+              }))
+          : [];
+      }
+
+      function handleAutocompleteKeydown(event) {
+        if (!state.tagAutocomplete.open && event.key !== 'Tab') return;
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          moveAutocompleteSelection(1);
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveAutocompleteSelection(-1);
+        } else if (event.key === 'Enter' || event.key === 'Tab') {
+          if (state.tagAutocomplete.open && state.tagAutocomplete.activeIndex >= 0) {
+            event.preventDefault();
+            const active = state.tagAutocomplete.items[state.tagAutocomplete.activeIndex];
+            if (active) applyAutocompleteTag(active.name);
+          }
+        } else if (event.key === 'Escape') {
+          closeTagAutocomplete();
+        }
+      }
+
+      function moveAutocompleteSelection(direction) {
+        if (!state.tagAutocomplete.items.length) return;
+        const count = state.tagAutocomplete.items.length;
+        state.tagAutocomplete.activeIndex = (state.tagAutocomplete.activeIndex + direction + count) % count;
+        renderTagAutocomplete();
+      }
+
+      function renderTagAutocomplete(emptyMessage) {
+        tagAutocompleteList.innerHTML = '';
+        const hasItems = state.tagAutocomplete.items.length > 0;
+        if (!hasItems) {
+          if (!emptyMessage) {
+            closeTagAutocomplete();
+            return;
+          }
+          const empty = document.createElement('div');
+          empty.className = 'autocomplete-empty';
+          empty.textContent = emptyMessage;
+          tagAutocompleteList.appendChild(empty);
+        } else {
+          state.tagAutocomplete.items.forEach((item, index) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'autocomplete-option' + (index === state.tagAutocomplete.activeIndex ? ' active' : '');
+            button.setAttribute('data-tag-name', item.name);
+            button.setAttribute('role', 'option');
+            button.setAttribute('aria-selected', index === state.tagAutocomplete.activeIndex ? 'true' : 'false');
+
+            const category = document.createElement('span');
+            category.className = 'autocomplete-category';
+            if (item.category !== null && item.category !== undefined) {
+              category.setAttribute('data-category', String(item.category));
+            }
+
+            const tag = document.createElement('span');
+            tag.className = 'autocomplete-tag';
+            const name = document.createElement('div');
+            name.className = 'autocomplete-name';
+            name.textContent = item.name.replaceAll('_', ' ');
+            const meta = document.createElement('div');
+            meta.className = 'autocomplete-meta';
+            meta.textContent = item.antecedentName ? 'Alias of ' + item.antecedentName.replaceAll('_', ' ') : categoryLabel(item.category);
+            tag.appendChild(name);
+            tag.appendChild(meta);
+
+            const count = document.createElement('span');
+            count.className = 'autocomplete-count';
+            count.textContent = formatPostCount(item.postCount);
+
+            button.appendChild(category);
+            button.appendChild(tag);
+            button.appendChild(count);
+            tagAutocompleteList.appendChild(button);
+          });
+        }
+        state.tagAutocomplete.open = true;
+        tagAutocomplete.hidden = false;
+        tagsInput.setAttribute('aria-expanded', 'true');
+      }
+
+      function closeTagAutocomplete() {
+        state.tagAutocomplete.items = [];
+        state.tagAutocomplete.activeIndex = -1;
+        state.tagAutocomplete.open = false;
+        tagAutocomplete.hidden = true;
+        tagsInput.setAttribute('aria-expanded', 'false');
+        tagAutocompleteList.innerHTML = '';
+      }
+
+      function applyAutocompleteTag(tagName) {
+        tagsInput.value = replaceActiveTagToken(tagsInput.value, tagName);
+        tagsInput.focus();
+        closeTagAutocomplete();
+      }
+
+      function getActiveTagToken(value) {
+        const normalized = String(value || '');
+        const endsWithSpace = /\s$/.test(normalized);
+        if (endsWithSpace) return '';
+        const parts = normalized.split(/\s+/);
+        return sanitizeAutocompleteQuery(parts[parts.length - 1] || '');
+      }
+
+      function replaceActiveTagToken(value, tagName) {
+        const normalized = String(value || '');
+        const parts = normalized.split(/\s+/).filter((part, index, array) => part || index < array.length - 1);
+        if (!parts.length || /\s$/.test(normalized)) {
+          return (normalized.trim() ? normalized.trim() + ' ' : '') + tagName + ' ';
+        }
+        parts[parts.length - 1] = tagName;
+        return parts.join(' ') + ' ';
+      }
+
+      function categoryLabel(category) {
+        const labels = {
+          0: 'General',
+          1: 'Artist',
+          3: 'Copyright',
+          4: 'Character',
+          5: 'Species',
+          6: 'Invalid',
+        };
+        return labels[category] || 'Tag';
+      }
+
+      function formatPostCount(count) {
+        return Number(count || 0).toLocaleString();
       }
 
       async function restartFeed() {
@@ -967,6 +1499,15 @@ function renderApp() {
         return ['s', 'q', 'e'].includes(value) ? value : '';
       }
 
+      function sanitizeAutocompleteQuery(value) {
+        return String(value || '')
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, '_')
+          .replace(/[^a-z0-9_:\-()']/g, '')
+          .slice(0, 64);
+      }
+
       function mapApiPost(post) {
         const ext = String((post.file && post.file.ext) || '').toLowerCase();
         const artist = Array.isArray(post.tags && post.tags.artist) ? post.tags.artist.filter(Boolean) : [];
@@ -1132,7 +1673,6 @@ function renderApp() {
         state.animationLock = true;
         clearTimers(direction === 0);
 
-        const currentSlide = state.currentSlide;
         const currentMedia = state.currentMedia;
         const targetEntry = await ensureSlide(index);
 
@@ -1258,7 +1798,13 @@ function renderApp() {
           media.addEventListener('load', () => slide.classList.remove('loading'), { once: true });
         }
 
-        media.addEventListener('click', () => {
+        media.addEventListener('click', (event) => {
+          if (Date.now() < state.suppressClickUntil) {
+            event.preventDefault();
+            return;
+          }
+          if (state.touchActive) return;
+          if (Math.abs(state.pointerDeltaY) > TAP_DISTANCE_THRESHOLD) return;
           if (media.tagName === 'VIDEO') {
             if (media.paused) {
               media.play().catch(() => {});
@@ -1363,7 +1909,7 @@ function normalizePage(value) {
 }
 
 function sanitizeTags(raw) {
-  return raw
+  return String(raw || '')
     .split(/\s+/)
     .map((tag) => tag.trim())
     .filter(Boolean)
@@ -1372,6 +1918,15 @@ function sanitizeTags(raw) {
 
 function sanitizeRating(raw) {
   return ['s', 'q', 'e'].includes(raw) ? raw : '';
+}
+
+function sanitizeAutocompleteQuery(raw) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_:\-()']/g, '')
+    .slice(0, 64);
 }
 
 function json(body, status = 200) {
