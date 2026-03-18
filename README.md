@@ -25,5 +25,6 @@ npm run deploy
 
 ## Notes
 
-- The Worker proxies requests to `https://e621.net/posts.json` so the browser never has to handle e621's API headers directly.
-- e621 requires a descriptive `User-Agent` for API usage. Update the placeholder contact in `src/worker.js` before production deployment.
+- The Worker proxies feed requests to `https://e621.net/posts.json` by default, but the browser now falls back to a direct request if `/api/posts` returns an error such as a 502 from blocked Worker egress traffic.
+- Browser JavaScript cannot set a custom `User-Agent` header, so the direct fallback uses the visitor's normal browser user agent while the Worker path continues to send the descriptive `User-Agent` configured in `src/worker.js`.
+- e621 requires a descriptive `User-Agent` for server-side API usage. Update the placeholder contact in `src/worker.js` before production deployment.

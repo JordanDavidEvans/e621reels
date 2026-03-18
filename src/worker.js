@@ -3,6 +3,7 @@ const USER_AGENT = 'e621reels/0.1.0 (Cloudflare Worker demo; contact: admin@exam
 const PAGE_SIZE = 24;
 const BASE_TAGS = ['animated'];
 const SUPPORTED_MEDIA = new Set(['webm', 'mp4', 'gif']);
+const UPSTREAM_ERROR_PREVIEW_LIMIT = 400;
 
 export default {
   async fetch(request) {
@@ -46,41 +47,85 @@ async function handlePosts(request, url) {
   upstream.searchParams.set('page', String(page));
   upstream.searchParams.set('tags', apiTags);
 
-  const response = await fetch(upstream, {
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': USER_AGENT,
-    },
-    cf: {
-      cacheTtl: 120,
-      cacheEverything: false,
-    },
-  });
-
-  if (!response.ok) {
-    return json(
-      {
-        error: 'Failed to fetch from e621',
-        status: response.status,
-      },
-      502,
-    );
-  }
-
-  const data = await response.json();
-  const posts = Array.isArray(data.posts)
-    ? data.posts
-        .filter((post) => post?.file?.url && SUPPORTED_MEDIA.has(String(post.file.ext || '').toLowerCase()))
-        .map((post) => mapPost(post))
-    : [];
-
-  return json({
+  const requestMeta = {
     mode,
     page,
     tags: rawTags,
     rating: requestedRating,
-    posts,
-  });
+    upstream: upstream.toString(),
+    ray: request.headers.get('cf-ray') || null,
+    colo: request.cf?.colo || null,
+  };
+
+  try {
+    const response = await fetch(upstream, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+      cf: {
+        cacheTtl: 120,
+        cacheEverything: false,
+      },
+    });
+
+    if (!response.ok) {
+      const upstreamBody = trimForLog(await response.text());
+      console.error('e621 upstream returned a non-OK response', {
+        ...requestMeta,
+        upstreamStatus: response.status,
+        upstreamStatusText: response.statusText,
+        upstreamBody,
+      });
+
+      return json(
+        {
+          error: 'Failed to fetch from e621',
+          status: response.status,
+          upstreamStatusText: response.statusText,
+          details: upstreamBody,
+          requestMeta,
+        },
+        502,
+      );
+    }
+
+    const data = await response.json();
+    const posts = Array.isArray(data.posts)
+      ? data.posts
+          .filter((post) => post?.file?.url && SUPPORTED_MEDIA.has(String(post.file.ext || '').toLowerCase()))
+          .map((post) => mapPost(post))
+      : [];
+
+    return json({
+      mode,
+      page,
+      tags: rawTags,
+      rating: requestedRating,
+      posts,
+      source: 'worker',
+    });
+  } catch (error) {
+    console.error('e621 upstream fetch threw an exception', {
+      ...requestMeta,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : null,
+    });
+
+    return json(
+      {
+        error: 'Failed to fetch from e621',
+        status: 0,
+        details: error instanceof Error ? error.message : String(error),
+        requestMeta,
+      },
+      502,
+    );
+  }
+}
+
+function trimForLog(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, UPSTREAM_ERROR_PREVIEW_LIMIT);
 }
 
 function mapPost(post) {
@@ -475,6 +520,9 @@ function renderApp() {
     </div>
 
     <script>
+      const CLIENT_E621_API = 'https://e621.net/posts.json';
+      const CLIENT_SUPPORTED_MEDIA = new Set(['webm', 'mp4', 'gif']);
+
       const state = {
         posts: [],
         currentIndex: 0,
@@ -487,6 +535,7 @@ function renderApp() {
         timer: null,
         progressTimer: null,
         countdownMs: 10000,
+        lastFeedSource: 'worker',
       };
 
       const mediaStage = document.getElementById('mediaStage');
@@ -573,10 +622,24 @@ function renderApp() {
           });
           if (state.tags) params.set('tags', state.tags);
           if (state.rating) params.set('rating', state.rating);
-          const response = await fetch('/api/posts?' + params.toString());
-          if (!response.ok) throw new Error('Upstream request failed');
-          const data = await response.json();
+
+          console.info('[feed] requesting posts', {
+            sourcePreference: 'worker-first',
+            page: state.nextPage,
+            mode: state.mode,
+            tags: state.tags,
+            rating: state.rating || null,
+          });
+
+          const { data, source } = await fetchPostsWithFallback(params);
           const incoming = Array.isArray(data.posts) ? data.posts : [];
+          state.lastFeedSource = source;
+
+          console.info('[feed] received posts', {
+            source,
+            page: state.nextPage,
+            count: incoming.length,
+          });
 
           if (replace) {
             state.posts = incoming;
@@ -595,10 +658,149 @@ function renderApp() {
             renderCurrentPost();
           }
         } catch (error) {
-          renderEmpty('Could not load posts', 'The feed request failed. Please try again in a moment.');
+          console.error('[feed] request failed', error);
+          renderEmpty('Could not load posts', 'The feed request failed. Please try again in a moment. Open the console for worker and fallback details.');
         } finally {
           state.loading = false;
         }
+      }
+
+      async function fetchPostsWithFallback(params) {
+        const workerUrl = '/api/posts?' + params.toString();
+        let workerError = null;
+
+        try {
+          const workerResponse = await fetch(workerUrl);
+          const workerPayload = await parseJsonSafely(workerResponse);
+
+          if (!workerResponse.ok) {
+            workerError = createFetchError('Worker feed request failed', {
+              url: workerUrl,
+              status: workerResponse.status,
+              payload: workerPayload,
+            });
+            console.warn('[feed] worker request failed', workerError.context);
+          } else {
+            return { data: workerPayload || {}, source: 'worker' };
+          }
+        } catch (error) {
+          workerError = createFetchError('Worker feed request threw', {
+            url: workerUrl,
+            cause: error instanceof Error ? error.message : String(error),
+          });
+          console.warn('[feed] worker request threw', workerError.context);
+        }
+
+        const directData = await fetchPostsDirectly(params, workerError);
+        return { data: directData, source: 'client-direct' };
+      }
+
+      async function fetchPostsDirectly(params, workerError) {
+        const upstreamUrl = new URL(CLIENT_E621_API);
+        upstreamUrl.searchParams.set('limit', '24');
+        upstreamUrl.searchParams.set('page', params.get('page'));
+        upstreamUrl.searchParams.set('tags', buildApiTags(params));
+
+        console.warn('[feed] falling back to direct browser request', {
+          upstreamUrl: upstreamUrl.toString(),
+          workerError: workerError ? workerError.context : null,
+        });
+
+        const upstreamResponse = await fetch(upstreamUrl.toString(), {
+          headers: { Accept: 'application/json' },
+        });
+        const upstreamPayload = await parseJsonSafely(upstreamResponse);
+
+        if (!upstreamResponse.ok) {
+          const directError = createFetchError('Direct e621 request failed', {
+            url: upstreamUrl.toString(),
+            status: upstreamResponse.status,
+            payload: upstreamPayload,
+            workerError: workerError ? workerError.context : null,
+          });
+          console.error('[feed] direct request failed', directError.context);
+          throw directError;
+        }
+
+        const posts = Array.isArray(upstreamPayload && upstreamPayload.posts)
+          ? upstreamPayload.posts
+              .filter((post) => post && post.file && post.file.url && CLIENT_SUPPORTED_MEDIA.has(String(post.file.ext || '').toLowerCase()))
+              .map((post) => mapApiPost(post))
+          : [];
+
+        return {
+          mode: params.get('mode') === 'score' ? 'score' : 'trending',
+          page: Number(params.get('page') || '1'),
+          tags: sanitizeClientTags(params.get('tags') || ''),
+          rating: sanitizeClientRating(params.get('rating')),
+          posts,
+          source: 'client-direct',
+        };
+      }
+
+      function buildApiTags(params) {
+        const tags = [
+          params.get('mode') === 'score' ? 'order:score' : 'order:rank',
+          'animated',
+          ...sanitizeClientTags(params.get('tags') || ''),
+        ];
+        const rating = sanitizeClientRating(params.get('rating'));
+        if (rating) tags.push('rating:' + rating);
+        return tags.join(' ');
+      }
+
+      function sanitizeClientTags(raw) {
+        return String(raw || '')
+          .split(/\s+/)
+          .map((tag) => tag.trim())
+          .filter(Boolean)
+          .slice(0, 12);
+      }
+
+      function sanitizeClientRating(value) {
+        return ['s', 'q', 'e'].includes(value) ? value : '';
+      }
+
+      function mapApiPost(post) {
+        const ext = String((post.file && post.file.ext) || '').toLowerCase();
+        const artist = Array.isArray(post.tags && post.tags.artist) ? post.tags.artist.filter(Boolean) : [];
+        const species = Array.isArray(post.tags && post.tags.species) ? post.tags.species.filter(Boolean) : [];
+        const general = Array.isArray(post.tags && post.tags.general) ? post.tags.general.filter(Boolean).slice(0, 12) : [];
+
+        return {
+          id: post.id,
+          ext,
+          type: ['webm', 'mp4'].includes(ext) ? 'video' : 'image',
+          score: (post.score && post.score.total) || 0,
+          rating: post.rating || 'u',
+          width: (post.sample && post.sample.width) || (post.file && post.file.width) || 0,
+          height: (post.sample && post.sample.height) || (post.file && post.file.height) || 0,
+          createdAt: post.created_at,
+          mediaUrl: post.file.url,
+          previewUrl: (post.preview && post.preview.url) || (post.sample && post.sample.url) || post.file.url,
+          sourceUrl: 'https://e621.net/posts/' + post.id,
+          description: [
+            artist.length ? 'Artist: ' + artist.join(', ') : 'Artist unknown',
+            species.length ? 'Species: ' + species.slice(0, 3).join(', ') : null,
+          ].filter(Boolean).join(' • '),
+          tags: artist.map((tag) => 'artist:' + tag).concat(general),
+        };
+      }
+
+      async function parseJsonSafely(response) {
+        const text = await response.text();
+        if (!text) return null;
+        try {
+          return JSON.parse(text);
+        } catch (error) {
+          return { rawText: text };
+        }
+      }
+
+      function createFetchError(message, context) {
+        const error = new Error(message);
+        error.context = context;
+        return error;
       }
 
       function renderStatus(title, body) {
@@ -662,7 +864,7 @@ function renderApp() {
         mediaStage.appendChild(media);
         postTitle.textContent = '#' + post.id;
         postDescription.textContent = post.description + ' • Rating: ' + post.rating.toUpperCase() + ' • Score: ' + post.score;
-        sortBadge.textContent = state.mode === 'score' ? 'Top score' : 'Trending';
+        sortBadge.textContent = (state.mode === 'score' ? 'Top score' : 'Trending') + (state.lastFeedSource === 'client-direct' ? ' • Direct' : '');
         counterBadge.textContent = (state.currentIndex + 1) + ' / ' + state.posts.length;
         openPostLink.href = post.sourceUrl;
         tagList.innerHTML = '';
