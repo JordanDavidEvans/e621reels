@@ -19,8 +19,26 @@ export default {
       return handleTagAutocomplete(request, url);
     }
 
+    if (url.pathname === '/robots.txt') {
+      return new Response(renderRobotsTxt(), {
+        headers: {
+          'content-type': 'text/plain; charset=UTF-8',
+          'cache-control': 'public, max-age=3600',
+        },
+      });
+    }
+
+    if (url.pathname === '/sitemap.xml') {
+      return new Response(renderSitemapXml(), {
+        headers: {
+          'content-type': 'application/xml; charset=UTF-8',
+          'cache-control': 'public, max-age=3600',
+        },
+      });
+    }
+
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      return new Response(renderApp(), {
+      return new Response(renderApp(url), {
         headers: {
           'content-type': 'text/html; charset=UTF-8',
           'cache-control': 'no-store',
@@ -253,13 +271,30 @@ function mapPost(post) {
   };
 }
 
-function renderApp() {
+function renderApp(url) {
+  const seo = buildSeo(url);
+  const landingLinks = buildLandingLinks();
+
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>e621 Reels</title>
+    <title>${escapeHtml(seo.title)}</title>
+    <meta name="description" content="${escapeHtml(seo.description)}" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <link rel="canonical" href="${escapeHtml(seo.canonicalUrl)}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="FurryReel" />
+    <meta property="og:title" content="${escapeHtml(seo.title)}" />
+    <meta property="og:description" content="${escapeHtml(seo.description)}" />
+    <meta property="og:url" content="${escapeHtml(seo.canonicalUrl)}" />
+    <meta property="og:image" content="https://furryreel.com/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${escapeHtml(seo.title)}" />
+    <meta name="twitter:description" content="${escapeHtml(seo.description)}" />
+    <meta name="theme-color" content="#080808" />
+    <script type="application/ld+json">${serializeJsonLd(seo.structuredData)}</script>
     <style>
       :root {
         color-scheme: dark;
@@ -680,6 +715,30 @@ function renderApp() {
         color: var(--muted);
         white-space: nowrap;
       }
+      .pill-button {
+        cursor: pointer;
+      }
+      .pill-button:hover,
+      .pill-button:focus-visible {
+        border-color: rgba(255,255,255,0.28);
+        background: rgba(255,255,255,0.12);
+        outline: none;
+      }
+      .pill-button.active {
+        background: var(--accent-soft);
+        border-color: rgba(255, 47, 120, 0.48);
+      }
+      .seo-content {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
       @media (max-width: 640px) {
         .shell {
           padding: 0;
@@ -695,6 +754,12 @@ function renderApp() {
   </head>
   <body>
     <div class="shell">
+      <section class="seo-content" aria-hidden="true">
+        <h1>${escapeHtml(seo.heading)}</h1>
+        <p>${escapeHtml(seo.description)}</p>
+        <p>${escapeHtml(seo.indexingText)}</p>
+        <ul>${landingLinks}</ul>
+      </section>
       <main class="app" id="appRoot">
         <div class="progress"><div id="progressBar"></div></div>
         <div class="viewport" id="viewport">
@@ -790,6 +855,14 @@ function renderApp() {
       </main>
     </div>
 
+    <noscript>
+      <section style="padding:24px;max-width:960px;margin:0 auto;color:#f6f6f6">
+        <h2>Browse FurryReel without JavaScript</h2>
+        <p>${escapeHtml(seo.description)}</p>
+        <ul>${landingLinks}</ul>
+      </section>
+    </noscript>
+
     <script>
       const CLIENT_E621_API = 'https://e621.net/posts.json';
       const CLIENT_E621_TAG_AUTOCOMPLETE_API = 'https://e621.net/tags/autocomplete.json';
@@ -802,15 +875,18 @@ function renderApp() {
       const IMAGE_COUNTDOWN_MS = 10000;
       const TAG_AUTOCOMPLETE_LIMIT = 8;
       const AUTOCOMPLETE_DEBOUNCE_MS = 160;
+      const INITIAL_MODE = ${JSON.stringify(seo.initialModeForClient)};
+      const INITIAL_TAGS = ${JSON.stringify(seo.initialTagsForClient)};
+      const INITIAL_RATING = ${JSON.stringify(seo.initialRatingForClient)};
 
       const state = {
         posts: [],
         currentIndex: 0,
         nextPage: 1,
         loading: false,
-        mode: 'trending',
-        tags: '',
-        rating: '',
+        mode: INITIAL_MODE,
+        tags: INITIAL_TAGS,
+        rating: INITIAL_RATING,
         muted: true,
         timer: null,
         progressTimer: null,
@@ -868,6 +944,10 @@ function renderApp() {
       const tagAutocomplete = document.getElementById('tagAutocomplete');
       const tagAutocompleteList = document.getElementById('tagAutocompleteList');
 
+      modeSelect.value = state.mode;
+      tagsInput.value = state.tags;
+      ratingSelect.value = state.rating;
+
       toggleFiltersButton.addEventListener('click', () => {
         const nextOpen = !filterPanel.classList.contains('open');
         filterPanel.classList.toggle('open', nextOpen);
@@ -886,6 +966,7 @@ function renderApp() {
         state.fitMedia = fitMediaToggle.checked;
         state.hideTags = hideTagsToggle.checked;
         syncDisplaySettings();
+        syncUrlState();
         closeSettings();
         await restartFeed();
       });
@@ -903,6 +984,7 @@ function renderApp() {
         state.hideTags = false;
         closeTagAutocomplete();
         syncDisplaySettings();
+        syncUrlState();
         closeSettings();
         await restartFeed();
       });
@@ -939,6 +1021,18 @@ function renderApp() {
         const option = event.target.closest('[data-tag-name]');
         if (!option) return;
         applyAutocompleteTag(option.getAttribute('data-tag-name'));
+      });
+      tagList.addEventListener('click', async (event) => {
+        const button = event.target.closest('[data-tag-filter]');
+        if (!button) return;
+        const nextTag = button.getAttribute('data-tag-filter') || '';
+        if (!nextTag || nextTag === state.tags) return;
+        tagsInput.value = nextTag;
+        state.tags = nextTag;
+        closeTagAutocomplete();
+        syncUrlState();
+        renderStatus('Loading tag…', 'Switching the reel feed to ' + nextTag.replaceAll('_', ' ') + '.');
+        await restartFeed();
       });
 
       document.addEventListener('click', (event) => {
@@ -988,6 +1082,15 @@ function renderApp() {
 
       function syncDisplaySettings() {
         metaBlock.classList.toggle('hidden-tags', state.hideTags);
+      }
+
+      function syncUrlState() {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.search = '';
+        if (state.mode !== 'trending') nextUrl.searchParams.set('mode', state.mode);
+        if (state.tags) nextUrl.searchParams.set('tags', state.tags);
+        if (state.rating) nextUrl.searchParams.set('rating', state.rating);
+        window.history.replaceState({}, '', nextUrl.toString());
       }
 
       function shouldIgnoreGestureTarget(target) {
@@ -1847,10 +1950,13 @@ function renderApp() {
 
         const tags = post.tags.length ? post.tags : ['No tags'];
         tags.slice(0, 8).forEach((tag) => {
-          const span = document.createElement('span');
-          span.className = 'pill';
-          span.textContent = tag.replaceAll('_', ' ');
-          tagList.appendChild(span);
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'pill pill-button' + (tag === state.tags ? ' active' : '');
+          button.textContent = tag.replaceAll('_', ' ');
+          button.setAttribute('data-tag-filter', tag);
+          button.setAttribute('aria-label', 'Filter feed by ' + tag.replaceAll('_', ' '));
+          tagList.appendChild(button);
         });
       }
 
@@ -1900,6 +2006,122 @@ function renderApp() {
     </script>
   </body>
 </html>`;
+}
+
+
+function buildSeo(url) {
+  const mode = url.searchParams.get('mode') === 'score' ? 'score' : 'trending';
+  const tags = sanitizeTags(url.searchParams.get('tags') || '');
+  const rating = sanitizeRating(url.searchParams.get('rating'));
+  const canonical = new URL(url.toString());
+  canonical.protocol = 'https:';
+  canonical.host = 'furryreel.com';
+  canonical.port = '';
+  canonical.pathname = '/';
+  canonical.search = '';
+  canonical.hash = '';
+  if (mode !== 'trending') canonical.searchParams.set('mode', mode);
+  if (tags.length) canonical.searchParams.set('tags', tags.join(' '));
+  if (rating) canonical.searchParams.set('rating', rating);
+
+  const humanTags = tags.map(formatTagLabel);
+  const modeLabel = mode === 'score' ? 'top scored' : 'trending';
+  const ratingLabel = rating ? `Rated ${rating.toUpperCase()}` : 'All ratings';
+  const titleParts = [];
+  if (humanTags.length) titleParts.push(humanTags.join(', '));
+  titleParts.push(mode === 'score' ? 'Top scored furry reels' : 'Trending furry reels');
+  const title = titleParts.join(' • ') + ' | FurryReel';
+  const description = humanTags.length
+    ? `Browse ${modeLabel} animated furry reels for ${humanTags.join(', ')} on FurryReel. Swipe through indexed video posts, GIFs, and image previews with ${ratingLabel.toLowerCase()}.`
+    : `Browse ${modeLabel} animated furry reels on FurryReel. Explore indexable e621-powered video posts, GIFs, and image previews built for fast swiping on furryreel.com.`;
+  const heading = humanTags.length
+    ? `${humanTags.join(', ')} furry reels`
+    : 'FurryReel animated furry feed';
+  const indexingText = `FurryReel serves a crawlable landing page, canonical URLs, sitemap.xml, robots.txt, and structured metadata so search engines can index this app experience.`;
+
+  return {
+    title,
+    description,
+    heading,
+    indexingText,
+    canonicalUrl: canonical.toString(),
+    initialModeForClient: mode,
+    initialTagsForClient: tags.join(' '),
+    initialRatingForClient: rating,
+    structuredData: {
+      '@context': 'https://schema.org',
+      '@type': 'CollectionPage',
+      name: title,
+      description,
+      url: canonical.toString(),
+      isPartOf: {
+        '@type': 'WebSite',
+        name: 'FurryReel',
+        url: 'https://furryreel.com/',
+      },
+      potentialAction: {
+        '@type': 'SearchAction',
+        target: 'https://furryreel.com/?tags={search_term_string}',
+        'query-input': 'required name=search_term_string',
+      },
+      about: tags.length ? humanTags : ['animated', 'furry'],
+      genre: ['animation', 'short-form video'],
+    },
+  };
+}
+
+function buildLandingLinks() {
+  const links = [
+    { href: '/', label: 'Trending animated furry reels' },
+    { href: '/?mode=score', label: 'Top scored furry reels' },
+    { href: '/?tags=wolf', label: 'Wolf furry reels' },
+    { href: '/?tags=fox', label: 'Fox furry reels' },
+    { href: '/?tags=dragon', label: 'Dragon furry reels' },
+    { href: '/?tags=canine', label: 'Canine furry reels' },
+  ];
+
+  return links
+    .map((link) => `<li><a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a></li>`)
+    .join('');
+}
+
+function renderRobotsTxt() {
+  return ['User-agent: *', 'Allow: /', 'Sitemap: https://furryreel.com/sitemap.xml'].join('\n');
+}
+
+function renderSitemapXml() {
+  const urls = [
+    'https://furryreel.com/',
+    'https://furryreel.com/?mode=score',
+    'https://furryreel.com/?tags=wolf',
+    'https://furryreel.com/?tags=fox',
+    'https://furryreel.com/?tags=dragon',
+    'https://furryreel.com/?tags=canine',
+  ];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls
+    .map((entry) => `  <url><loc>${escapeHtml(entry)}</loc></url>`)
+    .join('\n')}
+</urlset>`;
+}
+
+function formatTagLabel(tag) {
+  return String(tag || '').replaceAll('_', ' ');
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function serializeJsonLd(value) {
+  return JSON.stringify(value).replaceAll('</script', '<\\/script');
 }
 
 function normalizePage(value) {
