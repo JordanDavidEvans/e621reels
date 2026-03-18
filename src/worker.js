@@ -1504,7 +1504,7 @@ function renderApp() {
           .trim()
           .toLowerCase()
           .replace(/\s+/g, '_')
-          .replace(/[^a-z0-9_:\-()']/g, '')
+          .replace(/[^a-z0-9_:()'-]/g, '')
           .slice(0, 64);
       }
 
@@ -1925,7 +1925,7 @@ function sanitizeAutocompleteQuery(raw) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '_')
-    .replace(/[^a-z0-9_:\-()']/g, '')
+    .replace(/[^a-z0-9_:()'-]/g, '')
     .slice(0, 64);
 }
 
