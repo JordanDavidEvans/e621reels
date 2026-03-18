@@ -176,8 +176,13 @@ function renderApp() {
         --accent: #ff2f78;
         --accent-soft: rgba(255, 47, 120, 0.18);
         --outline: rgba(255,255,255,0.12);
+        --safe-top: max(18px, env(safe-area-inset-top));
+        --safe-bottom: max(24px, env(safe-area-inset-bottom));
       }
       * { box-sizing: border-box; }
+      html, body {
+        overscroll-behavior: none;
+      }
       body {
         margin: 0;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
@@ -203,20 +208,69 @@ function renderApp() {
         position: relative;
         background: #000;
         box-shadow: 0 30px 90px rgba(0, 0, 0, 0.45);
+        touch-action: none;
       }
-      .media-stage {
+      .viewport {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        background: #000;
+      }
+      .reel-track {
+        position: absolute;
+        inset: 0;
+        transform: translate3d(0, 0, 0);
+        will-change: transform;
+      }
+      .reel-track.animating {
+        transition: transform 320ms cubic-bezier(.22, .61, .36, 1);
+      }
+      .reel-slide {
         position: absolute;
         inset: 0;
         background: #000;
+        overflow: hidden;
       }
-      .media-stage img,
-      .media-stage video {
+      .reel-slide.placeholder {
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+      .reel-slide::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background-image: var(--preview-image, none);
+        background-size: cover;
+        background-position: center;
+        filter: blur(28px) saturate(0.9);
+        transform: scale(1.08);
+        opacity: 0.55;
+      }
+      .reel-media,
+      .reel-media-fallback {
         position: absolute;
         inset: 0;
         width: 100%;
         height: 100%;
-        object-fit: cover;
         background: #000;
+      }
+      .reel-media {
+        object-fit: cover;
+      }
+      .reel-media.fit {
+        object-fit: contain;
+      }
+      .reel-media-fallback {
+        background-size: cover;
+        background-position: center;
+        opacity: 0;
+        transition: opacity 180ms ease;
+      }
+      .reel-slide.loading .reel-media-fallback,
+      .reel-slide.awaiting-play .reel-media-fallback {
+        opacity: 0.92;
       }
       .gradient {
         position: absolute;
@@ -229,7 +283,12 @@ function renderApp() {
         inset: 0;
         display: grid;
         grid-template-rows: auto 1fr auto;
-        padding: 18px 16px 24px;
+        padding: var(--safe-top) 16px var(--safe-bottom);
+        z-index: 2;
+        pointer-events: none;
+      }
+      .overlay > * {
+        pointer-events: auto;
       }
       .topbar {
         display: flex;
@@ -250,7 +309,8 @@ function renderApp() {
       .filter-panel label span,
       .field-help,
       .tagline,
-      .counter {
+      .counter,
+      .swipe-hint {
         color: var(--muted);
       }
       .badge-row {
@@ -258,12 +318,14 @@ function renderApp() {
         gap: 8px;
         flex-wrap: wrap;
         justify-content: flex-end;
+        padding-left: 8px;
       }
       .badge,
       .pill,
-      .counter {
+      .counter,
+      .swipe-hint {
         border: 1px solid var(--outline);
-        background: rgba(8, 8, 12, 0.6);
+        background: rgba(8, 8, 12, 0.5);
         backdrop-filter: blur(18px);
         border-radius: 999px;
         padding: 8px 12px;
@@ -278,6 +340,7 @@ function renderApp() {
         border-radius: 24px;
         padding: 18px 20px;
         backdrop-filter: blur(18px);
+        z-index: 3;
       }
       .bottom {
         display: grid;
@@ -288,6 +351,7 @@ function renderApp() {
       .meta {
         display: grid;
         gap: 10px;
+        min-width: 0;
       }
       .meta h2 {
         margin: 0;
@@ -325,6 +389,20 @@ function renderApp() {
         backdrop-filter: blur(20px);
         cursor: pointer;
       }
+      .settings-button {
+        width: 38px;
+        height: 38px;
+        background: rgba(10, 10, 14, 0.18);
+        border-color: rgba(255,255,255,0.18);
+        opacity: 0.42;
+        transition: opacity 140ms ease, background 140ms ease;
+      }
+      .settings-button:hover,
+      .settings-button:focus-visible,
+      .settings-button.active {
+        opacity: 1;
+        background: rgba(14, 14, 18, 0.62);
+      }
       .side-label {
         font-size: 0.74rem;
       }
@@ -335,32 +413,24 @@ function renderApp() {
         right: 0;
         height: 4px;
         background: rgba(255,255,255,0.08);
+        z-index: 4;
       }
       .progress > div {
         height: 100%;
         width: 0;
         background: linear-gradient(90deg, #ff2f78, #ffa34d);
-        transition: width 180ms linear;
+        transition: width 120ms linear;
       }
-      .filters-toggle {
+      .settings-toggle {
         position: absolute;
-        left: 16px;
-        bottom: 140px;
-        z-index: 3;
-      }
-      .filters-toggle button {
-        border: 1px solid var(--outline);
-        border-radius: 999px;
-        padding: 10px 14px;
-        color: var(--text);
-        background: var(--panel);
-        backdrop-filter: blur(18px);
-        cursor: pointer;
+        right: 14px;
+        top: calc(var(--safe-top) + 54px);
+        z-index: 5;
       }
       .filter-panel {
         position: absolute;
         inset: auto 14px 16px 14px;
-        z-index: 4;
+        z-index: 6;
         padding: 16px;
         border-radius: 24px;
         border: 1px solid var(--outline);
@@ -368,13 +438,16 @@ function renderApp() {
         backdrop-filter: blur(20px);
         display: none;
         gap: 12px;
+        max-height: min(70vh, 620px);
+        overflow: auto;
       }
       .filter-panel.open { display: grid; }
       .filter-panel h3 {
         margin: 0;
         font-size: 1rem;
       }
-      .filter-panel label {
+      .filter-panel label,
+      .settings-option {
         display: grid;
         gap: 6px;
       }
@@ -386,6 +459,16 @@ function renderApp() {
         color: var(--text);
         padding: 12px 14px;
         outline: none;
+      }
+      .settings-option {
+        grid-template-columns: auto 1fr;
+        align-items: center;
+        gap: 10px;
+      }
+      .settings-option input {
+        inline-size: 18px;
+        block-size: 18px;
+        margin: 0;
       }
       .filter-actions {
         display: flex;
@@ -410,6 +493,9 @@ function renderApp() {
       .jump {
         display: flex;
         gap: 10px;
+      }
+      .meta.hidden-tags #tagList {
+        display: none;
       }
       .sr-only {
         position: absolute;
@@ -439,9 +525,11 @@ function renderApp() {
   </head>
   <body>
     <div class="shell">
-      <main class="app">
+      <main class="app" id="appRoot">
         <div class="progress"><div id="progressBar"></div></div>
-        <div class="media-stage" id="mediaStage"></div>
+        <div class="viewport" id="viewport">
+          <div class="reel-track" id="reelTrack"></div>
+        </div>
         <div class="gradient"></div>
         <section class="overlay">
           <div class="topbar">
@@ -461,10 +549,10 @@ function renderApp() {
           </div>
 
           <div class="bottom">
-            <div class="meta">
+            <div class="meta" id="metaBlock">
               <div>
                 <h2 id="postTitle">Waiting for posts</h2>
-                <p id="postDescription">Use the filter panel to swap between trending and score-sorted posts or add tags.</p>
+                <p id="postDescription">Use the settings cog to change feed filters or display options, then swipe up and down through posts.</p>
               </div>
               <div class="pill-row" id="tagList"></div>
               <div class="jump">
@@ -481,14 +569,14 @@ function renderApp() {
           </div>
         </section>
 
-        <div class="filters-toggle">
-          <button id="toggleFiltersButton" type="button">Filters & sort</button>
+        <div class="settings-toggle">
+          <button class="action-button settings-button" id="toggleFiltersButton" type="button" aria-label="Open feed settings">⚙</button>
         </div>
 
         <form class="filter-panel" id="filterPanel">
           <div>
             <h3>Feed controls</h3>
-            <p class="field-help">Default opens the ranking feed. Add tags like <code>dragon animated</code> or switch to score sorting.</p>
+            <p class="field-help">Swipe vertically like Reels. Videos now play through before auto-advancing, while still preloading the next item to keep transitions smooth.</p>
           </div>
           <label>
             <span>Sort mode</span>
@@ -510,11 +598,19 @@ function renderApp() {
               <option value="e">Explicit</option>
             </select>
           </label>
+          <label class="settings-option">
+            <input id="fitMediaToggle" name="fitMedia" type="checkbox" />
+            <span>Fit media inside the frame instead of filling/cropping it.</span>
+          </label>
+          <label class="settings-option">
+            <input id="hideTagsToggle" name="hideTags" type="checkbox" />
+            <span>Hide the tag pills overlay for a cleaner full-screen view.</span>
+          </label>
           <div class="filter-actions">
             <button class="primary" type="submit">Apply</button>
             <button class="secondary" id="resetButton" type="button">Reset</button>
           </div>
-          <p class="hint">Posts advance after ~10 seconds or when the current video ends. Click anywhere on the media to pause or play.</p>
+          <p class="hint">Tap the current reel to pause or resume. The feed auto-swipes with animation when an image timer ends or a video finishes.</p>
         </form>
       </main>
     </div>
@@ -522,6 +618,9 @@ function renderApp() {
     <script>
       const CLIENT_E621_API = 'https://e621.net/posts.json';
       const CLIENT_SUPPORTED_MEDIA = new Set(['webm', 'mp4', 'gif']);
+      const SWIPE_THRESHOLD = 90;
+      const PRELOAD_DISTANCE = 2;
+      const IMAGE_COUNTDOWN_MS = 10000;
 
       const state = {
         posts: [],
@@ -534,11 +633,21 @@ function renderApp() {
         muted: true,
         timer: null,
         progressTimer: null,
-        countdownMs: 10000,
+        animationLock: false,
+        fitMedia: false,
+        hideTags: false,
+        touchActive: false,
+        pointerStartY: 0,
+        pointerDeltaY: 0,
+        currentMedia: null,
+        currentSlide: null,
+        preloaded: new Map(),
         lastFeedSource: 'worker',
       };
 
-      const mediaStage = document.getElementById('mediaStage');
+      const viewport = document.getElementById('viewport');
+      const reelTrack = document.getElementById('reelTrack');
+      const metaBlock = document.getElementById('metaBlock');
       const postTitle = document.getElementById('postTitle');
       const postDescription = document.getElementById('postDescription');
       const statusCard = document.getElementById('statusCard');
@@ -558,9 +667,12 @@ function renderApp() {
       const toggleFiltersButton = document.getElementById('toggleFiltersButton');
       const resetButton = document.getElementById('resetButton');
       const toggleMuteButton = document.getElementById('toggleMuteButton');
+      const fitMediaToggle = document.getElementById('fitMediaToggle');
+      const hideTagsToggle = document.getElementById('hideTagsToggle');
 
       toggleFiltersButton.addEventListener('click', () => {
         filterPanel.classList.toggle('open');
+        toggleFiltersButton.classList.toggle('active', filterPanel.classList.contains('open'));
       });
 
       filterPanel.addEventListener('submit', async (event) => {
@@ -568,7 +680,10 @@ function renderApp() {
         state.mode = modeSelect.value;
         state.tags = tagsInput.value.trim();
         state.rating = ratingSelect.value;
-        filterPanel.classList.remove('open');
+        state.fitMedia = fitMediaToggle.checked;
+        state.hideTags = hideTagsToggle.checked;
+        syncDisplaySettings();
+        closeSettings();
         await restartFeed();
       });
 
@@ -576,10 +691,15 @@ function renderApp() {
         modeSelect.value = 'trending';
         tagsInput.value = '';
         ratingSelect.value = '';
+        fitMediaToggle.checked = false;
+        hideTagsToggle.checked = false;
         state.mode = 'trending';
         state.tags = '';
         state.rating = '';
-        filterPanel.classList.remove('open');
+        state.fitMedia = false;
+        state.hideTags = false;
+        syncDisplaySettings();
+        closeSettings();
         await restartFeed();
       });
 
@@ -587,9 +707,13 @@ function renderApp() {
       previousButton.addEventListener('click', () => goToRelativePost(-1));
       toggleMuteButton.addEventListener('click', () => {
         state.muted = !state.muted;
-        const video = mediaStage.querySelector('video');
-        if (video) {
-          video.muted = state.muted;
+        state.preloaded.forEach((entry) => {
+          if (entry.media && entry.media.tagName === 'VIDEO') {
+            entry.media.muted = state.muted;
+          }
+        });
+        if (state.currentMedia && state.currentMedia.tagName === 'VIDEO') {
+          state.currentMedia.muted = state.muted;
         }
         toggleMuteButton.textContent = state.muted ? '🔇' : '🔊';
       });
@@ -599,15 +723,95 @@ function renderApp() {
           goToRelativePost(1);
         } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
           goToRelativePost(-1);
+        } else if (event.key.toLowerCase() === 'f') {
+          state.fitMedia = !state.fitMedia;
+          fitMediaToggle.checked = state.fitMedia;
+          syncDisplaySettings();
+          rerenderCurrentSlide();
+        } else if (event.key.toLowerCase() === 't') {
+          state.hideTags = !state.hideTags;
+          hideTagsToggle.checked = state.hideTags;
+          syncDisplaySettings();
+        } else if (event.key === 'Escape') {
+          closeSettings();
         }
       });
+
+      viewport.addEventListener('pointerdown', handlePointerDown);
+      viewport.addEventListener('pointermove', handlePointerMove);
+      viewport.addEventListener('pointerup', handlePointerUp);
+      viewport.addEventListener('pointercancel', cancelPointerGesture);
+      viewport.addEventListener('wheel', handleWheel, { passive: false });
+
+      function closeSettings() {
+        filterPanel.classList.remove('open');
+        toggleFiltersButton.classList.remove('active');
+      }
+
+      function syncDisplaySettings() {
+        metaBlock.classList.toggle('hidden-tags', state.hideTags);
+      }
+
+      function handlePointerDown(event) {
+        if (state.animationLock) return;
+        if (filterPanel.contains(event.target) || toggleFiltersButton.contains(event.target)) return;
+        state.touchActive = true;
+        state.pointerStartY = event.clientY;
+        state.pointerDeltaY = 0;
+        reelTrack.classList.remove('animating');
+        viewport.setPointerCapture(event.pointerId);
+      }
+
+      function handlePointerMove(event) {
+        if (!state.touchActive || state.animationLock) return;
+        state.pointerDeltaY = event.clientY - state.pointerStartY;
+        updateTrackForDrag(state.pointerDeltaY);
+      }
+
+      function handlePointerUp(event) {
+        if (!state.touchActive) return;
+        viewport.releasePointerCapture(event.pointerId);
+        finalizeSwipe(state.pointerDeltaY);
+      }
+
+      function cancelPointerGesture() {
+        if (!state.touchActive) return;
+        finalizeSwipe(0);
+      }
+
+      function handleWheel(event) {
+        if (filterPanel.classList.contains('open') || state.animationLock) return;
+        if (Math.abs(event.deltaY) < 8) return;
+        event.preventDefault();
+        goToRelativePost(event.deltaY > 0 ? 1 : -1);
+      }
+
+      function updateTrackForDrag(deltaY) {
+        refreshTrackSlides();
+        reelTrack.style.transform = 'translate3d(0, ' + deltaY + 'px, 0)';
+        ensureAdjacentSlides();
+      }
+
+      function finalizeSwipe(deltaY) {
+        state.touchActive = false;
+        const direction = deltaY <= -SWIPE_THRESHOLD ? 1 : deltaY >= SWIPE_THRESHOLD ? -1 : 0;
+        if (direction === 0) {
+          animateTrackTo(0);
+          return;
+        }
+        goToRelativePost(direction, { animated: true });
+      }
 
       async function restartFeed() {
         clearTimers();
         state.posts = [];
         state.currentIndex = 0;
         state.nextPage = 1;
-        mediaStage.innerHTML = '';
+        state.currentMedia = null;
+        state.currentSlide = null;
+        state.preloaded.clear();
+        reelTrack.innerHTML = '';
+        reelTrack.style.transform = 'translate3d(0, 0, 0)';
         renderStatus('Loading feed…', 'Pulling fresh posts from e621.');
         await loadPosts(true);
       }
@@ -654,8 +858,10 @@ function renderApp() {
             return;
           }
 
-          if (replace || !mediaStage.firstChild) {
-            renderCurrentPost();
+          if (replace || !state.currentSlide) {
+            await showPost(state.currentIndex, { immediate: true });
+          } else {
+            schedulePreloadAroundIndex(state.currentIndex);
           }
         } catch (error) {
           console.error('[feed] request failed', error);
@@ -810,7 +1016,7 @@ function renderApp() {
       }
 
       function renderEmpty(title, body) {
-        mediaStage.innerHTML = '';
+        reelTrack.innerHTML = '';
         clearTimers();
         renderStatus(title, body);
         postTitle.textContent = title;
@@ -820,48 +1026,272 @@ function renderApp() {
         progressBar.style.width = '0%';
       }
 
-      function renderCurrentPost() {
-        const post = state.posts[state.currentIndex];
+      function setProgressValue(value) {
+        progressBar.style.width = Math.max(0, Math.min(100, value)) + '%';
+      }
+
+      function clearTimers(resetProgress = true) {
+        if (state.timer) {
+          clearTimeout(state.timer);
+          state.timer = null;
+        }
+        if (state.progressTimer) {
+          clearInterval(state.progressTimer);
+          state.progressTimer = null;
+        }
+        if (resetProgress) {
+          setProgressValue(0);
+        }
+      }
+
+      function scheduleImageAdvance() {
+        clearTimers();
+        const startedAt = Date.now();
+        state.timer = setTimeout(() => goToRelativePost(1), IMAGE_COUNTDOWN_MS);
+        state.progressTimer = setInterval(() => {
+          const elapsed = Date.now() - startedAt;
+          setProgressValue((elapsed / IMAGE_COUNTDOWN_MS) * 100);
+          if (elapsed >= IMAGE_COUNTDOWN_MS) {
+            clearTimers(false);
+          }
+        }, 100);
+      }
+
+      function watchVideoProgress(video) {
+        clearTimers();
+        const update = () => {
+          if (!video.duration || !Number.isFinite(video.duration)) {
+            setProgressValue(0);
+            return;
+          }
+          setProgressValue((video.currentTime / video.duration) * 100);
+        };
+        update();
+        state.progressTimer = setInterval(update, 120);
+      }
+
+      async function goToRelativePost(offset, options = {}) {
+        if (!state.posts.length || state.animationLock) return;
+        const nextIndex = state.currentIndex + offset;
+        if (nextIndex < 0) {
+          animateTrackTo(0);
+          return;
+        }
+
+        if (nextIndex >= state.posts.length) {
+          if (!state.loading) {
+            await loadPosts(false);
+          }
+          if (nextIndex >= state.posts.length) {
+            animateTrackTo(0);
+            return;
+          }
+        }
+
+        await showPost(nextIndex, { immediate: options.immediate === true, direction: Math.sign(offset) || 1 });
+      }
+
+      function rerenderCurrentSlide() {
+        if (!state.posts.length) return;
+        const currentEntry = state.preloaded.get(state.currentIndex);
+        if (currentEntry) {
+          currentEntry.media.classList.toggle('fit', state.fitMedia);
+        }
+        if (state.currentSlide) {
+          const media = state.currentSlide.querySelector('.reel-media');
+          if (media) {
+            media.classList.toggle('fit', state.fitMedia);
+          }
+        }
+      }
+
+      async function showPost(index, options = {}) {
+        const post = state.posts[index];
         if (!post) return;
 
         statusCard.hidden = true;
-        mediaStage.innerHTML = '';
-        clearTimers();
+        const direction = index > state.currentIndex ? 1 : index < state.currentIndex ? -1 : 0;
+        const movement = options.immediate || direction === 0 ? 0 : direction;
+
+        if (!state.currentSlide || options.immediate) {
+          const entry = await ensureSlide(index);
+          state.currentIndex = index;
+          setCurrentSlide(entry.slide, entry.media);
+          refreshTrackSlides();
+          updateMeta(post);
+          startPlaybackForPost(post, entry.media, entry.slide);
+          ensureAdjacentSlides();
+          schedulePreloadAroundIndex(index);
+          if (state.posts.length - index <= 4) {
+            loadPosts(false);
+          }
+          animateTrackTo(0, false);
+          return;
+        }
+
+        state.animationLock = true;
+        clearTimers(direction === 0);
+
+        const currentSlide = state.currentSlide;
+        const currentMedia = state.currentMedia;
+        const targetEntry = await ensureSlide(index);
+
+        if (currentMedia && currentMedia.tagName === 'VIDEO') {
+          currentMedia.pause();
+        }
+
+        state.currentIndex = index;
+        setCurrentSlide(targetEntry.slide, targetEntry.media);
+        refreshTrackSlides();
+        updateMeta(post);
+        ensureAdjacentSlides();
+        schedulePreloadAroundIndex(index);
+
+        const trackTarget = movement > 0 ? -viewport.clientHeight : viewport.clientHeight;
+        await animateTrackTo(trackTarget, true);
+        reelTrack.classList.remove('animating');
+        reelTrack.style.transform = 'translate3d(0, 0, 0)';
+        refreshTrackSlides();
+        startPlaybackForPost(post, targetEntry.media, targetEntry.slide);
+        state.animationLock = false;
+
+        if (state.posts.length - index <= 4) {
+          loadPosts(false);
+        }
+      }
+
+      function positionSlide(slide, offsetPercent) {
+        slide.style.transform = 'translate3d(0, ' + offsetPercent + '%, 0)';
+      }
+
+      function setCurrentSlide(slide, media) {
+        state.currentSlide = slide;
+        state.currentMedia = media;
+      }
+
+      async function ensureSlide(index) {
+        if (state.preloaded.has(index)) {
+          return state.preloaded.get(index);
+        }
+        const entry = await createSlide(state.posts[index]);
+        state.preloaded.set(index, entry);
+        prunePreloaded(index);
+        return entry;
+      }
+
+      function refreshTrackSlides() {
+        reelTrack.innerHTML = '';
+        if (!state.posts.length) return;
+
+        const indexes = [state.currentIndex - 1, state.currentIndex, state.currentIndex + 1].filter((index) => index >= 0 && index < state.posts.length);
+        indexes.forEach((index) => {
+          const entry = state.preloaded.get(index);
+          if (!entry) return;
+          positionSlide(entry.slide, (index - state.currentIndex) * 100);
+          reelTrack.appendChild(entry.slide);
+        });
+      }
+
+      function prunePreloaded(centerIndex) {
+        const allowed = new Set();
+        for (let offset = -PRELOAD_DISTANCE; offset <= PRELOAD_DISTANCE; offset += 1) {
+          allowed.add(centerIndex + offset);
+        }
+        Array.from(state.preloaded.keys()).forEach((key) => {
+          if (key === state.currentIndex || allowed.has(key)) return;
+          const entry = state.preloaded.get(key);
+          if (entry && entry.media && entry.media.tagName === 'VIDEO') {
+            entry.media.pause();
+            entry.media.removeAttribute('src');
+            entry.media.load();
+          }
+          state.preloaded.delete(key);
+        });
+      }
+
+      async function createSlide(post) {
+        const slide = document.createElement('article');
+        slide.className = 'reel-slide loading';
+        slide.style.setProperty('--preview-image', post.previewUrl ? 'url("' + post.previewUrl.replace(/"/g, '\\"') + '")' : 'none');
+
+        const fallback = document.createElement('div');
+        fallback.className = 'reel-media-fallback';
+        fallback.style.backgroundImage = post.previewUrl ? 'url("' + post.previewUrl.replace(/"/g, '\\"') + '")' : 'none';
+        slide.appendChild(fallback);
 
         let media;
         if (post.type === 'video') {
           media = document.createElement('video');
           media.src = post.mediaUrl;
           media.poster = post.previewUrl;
-          media.autoplay = true;
+          media.preload = 'auto';
           media.playsInline = true;
           media.loop = false;
           media.muted = state.muted;
           media.controls = false;
-          media.addEventListener('ended', () => goToRelativePost(1));
-          media.addEventListener('canplay', () => media.play().catch(() => {}), { once: true });
+          media.autoplay = false;
+          media.className = 'reel-media' + (state.fitMedia ? ' fit' : '');
+          media.addEventListener('loadeddata', () => slide.classList.remove('loading'), { once: true });
+          media.addEventListener('ended', () => {
+            if (state.currentMedia === media) {
+              goToRelativePost(1, { animated: true });
+            }
+          });
+          media.addEventListener('play', () => {
+            if (state.currentMedia === media) watchVideoProgress(media);
+            slide.classList.remove('awaiting-play');
+          });
+          media.addEventListener('pause', () => {
+            if (state.currentMedia === media && !media.ended) {
+              clearTimers(false);
+            }
+          });
+          media.addEventListener('waiting', () => slide.classList.add('awaiting-play'));
+          media.addEventListener('playing', () => slide.classList.remove('awaiting-play'));
         } else {
           media = document.createElement('img');
           media.src = post.mediaUrl;
           media.alt = post.description || 'e621 media post';
           media.loading = 'eager';
+          media.decoding = 'async';
+          media.className = 'reel-media' + (state.fitMedia ? ' fit' : '');
+          media.addEventListener('load', () => slide.classList.remove('loading'), { once: true });
         }
 
         media.addEventListener('click', () => {
           if (media.tagName === 'VIDEO') {
             if (media.paused) {
               media.play().catch(() => {});
-              restartCountdown();
             } else {
               media.pause();
-              clearTimers(false);
             }
           } else {
-            goToRelativePost(1);
+            goToRelativePost(1, { animated: true });
           }
         });
 
-        mediaStage.appendChild(media);
+        slide.appendChild(media);
+        return { slide, media, post };
+      }
+
+      function startPlaybackForPost(post, media, slide) {
+        slide.classList.remove('loading');
+        if (post.type === 'video') {
+          media.currentTime = 0;
+          media.muted = state.muted;
+          slide.classList.add('awaiting-play');
+          media.play().then(() => {
+            watchVideoProgress(media);
+          }).catch(() => {
+            slide.classList.add('awaiting-play');
+            clearTimers();
+          });
+        } else {
+          scheduleImageAdvance();
+        }
+      }
+
+      function updateMeta(post) {
         postTitle.textContent = '#' + post.id;
         postDescription.textContent = post.description + ' • Rating: ' + post.rating.toUpperCase() + ' • Score: ' + post.score;
         sortBadge.textContent = (state.mode === 'score' ? 'Top score' : 'Trending') + (state.lastFeedSource === 'client-direct' ? ' • Direct' : '');
@@ -876,70 +1306,50 @@ function renderApp() {
           span.textContent = tag.replaceAll('_', ' ');
           tagList.appendChild(span);
         });
-
-        restartCountdown();
-
-        if (state.posts.length - state.currentIndex <= 4) {
-          loadPosts(false);
-        }
       }
 
-      async function goToRelativePost(offset) {
+      function ensureAdjacentSlides() {
         if (!state.posts.length) return;
-        const nextIndex = state.currentIndex + offset;
-        if (nextIndex < 0) {
-          state.currentIndex = 0;
-          renderCurrentPost();
-          return;
-        }
-
-        if (nextIndex >= state.posts.length) {
-          if (!state.loading) {
-            await loadPosts(false);
-          }
-          if (nextIndex >= state.posts.length) {
-            state.currentIndex = state.posts.length - 1;
-          } else {
-            state.currentIndex = nextIndex;
-          }
-          renderCurrentPost();
-          return;
-        }
-
-        state.currentIndex = nextIndex;
-        renderCurrentPost();
+        const beforeIndex = state.currentIndex - 1;
+        const afterIndex = state.currentIndex + 1;
+        Promise.resolve().then(async () => {
+          if (beforeIndex >= 0) await ensureSlide(beforeIndex);
+          if (afterIndex < state.posts.length) await ensureSlide(afterIndex);
+          refreshTrackSlides();
+        }).catch((error) => console.warn('Adjacent preload failed', error));
       }
 
-      function clearTimers(resetProgress = true) {
-        if (state.timer) {
-          clearTimeout(state.timer);
-          state.timer = null;
-        }
-        if (state.progressTimer) {
-          clearInterval(state.progressTimer);
-          state.progressTimer = null;
-        }
-        if (resetProgress) {
-          progressBar.style.width = '0%';
+      function schedulePreloadAroundIndex(index) {
+        for (let offset = 1; offset <= PRELOAD_DISTANCE; offset += 1) {
+          const nextIndex = index + offset;
+          const previousIndex = index - offset;
+          if (nextIndex < state.posts.length) {
+            ensureSlide(nextIndex).catch((error) => console.warn('Preload failed', error));
+          }
+          if (previousIndex >= 0) {
+            ensureSlide(previousIndex).catch((error) => console.warn('Preload failed', error));
+          }
         }
       }
 
-      function restartCountdown() {
-        clearTimers();
-        const startedAt = Date.now();
-        progressBar.style.width = '0%';
-        state.timer = setTimeout(() => goToRelativePost(1), state.countdownMs);
-        state.progressTimer = setInterval(() => {
-          const elapsed = Date.now() - startedAt;
-          const progress = Math.min((elapsed / state.countdownMs) * 100, 100);
-          progressBar.style.width = progress + '%';
-          if (progress >= 100) {
-            clearInterval(state.progressTimer);
-            state.progressTimer = null;
-          }
-        }, 100);
+      function animateTrackTo(targetY, withTransition = true) {
+        if (withTransition) {
+          reelTrack.classList.add('animating');
+          reelTrack.style.transform = 'translate3d(0, ' + targetY + 'px, 0)';
+          return new Promise((resolve) => {
+            const done = () => {
+              reelTrack.removeEventListener('transitionend', done);
+              resolve();
+            };
+            reelTrack.addEventListener('transitionend', done, { once: true });
+          });
+        }
+        reelTrack.classList.remove('animating');
+        reelTrack.style.transform = 'translate3d(0, ' + targetY + 'px, 0)';
+        return Promise.resolve();
       }
 
+      syncDisplaySettings();
       restartFeed();
     </script>
   </body>
