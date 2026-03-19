@@ -915,6 +915,8 @@ function renderApp(url) {
       const PRELOAD_DISTANCE = 2;
       const IMAGE_COUNTDOWN_MS = 10000;
       const MIN_VIDEO_PLAYBACK_MS = 10000;
+      const TRACK_TRANSITION_MS = 320;
+      const TRACK_TRANSITION_FALLBACK_MS = TRACK_TRANSITION_MS + 120;
       const TAG_AUTOCOMPLETE_LIMIT = 8;
       const AUTOCOMPLETE_DEBOUNCE_MS = 160;
       const INITIAL_MODE = ${JSON.stringify(seo.initialModeForClient)};
@@ -947,6 +949,7 @@ function renderApp(url) {
         pointerDeltaX: 0,
         currentMedia: null,
         currentSlide: null,
+        navigationToken: 0,
         preloaded: new Map(),
         lastFeedSource: 'worker',
         suppressClickUntil: 0,
@@ -1813,6 +1816,7 @@ function renderApp(url) {
         const post = state.posts[index];
         if (!post) return;
 
+        const navigationToken = ++state.navigationToken;
         statusCard.hidden = true;
         const previousIndex = state.currentIndex;
         const direction = index > previousIndex ? 1 : index < previousIndex ? -1 : 0;
@@ -1820,6 +1824,7 @@ function renderApp(url) {
 
         if (!state.currentSlide || options.immediate) {
           const entry = await ensureSlide(index);
+          if (navigationToken !== state.navigationToken) return;
           state.currentIndex = index;
           setCurrentSlide(entry.slide, entry.media);
           refreshTrackSlides();
@@ -1837,32 +1842,39 @@ function renderApp(url) {
         state.animationLock = true;
         clearTimers(direction === 0);
 
-        const currentMedia = state.currentMedia;
-        const targetEntry = await ensureSlide(index);
+        try {
+          const currentMedia = state.currentMedia;
+          const targetEntry = await ensureSlide(index);
+          if (navigationToken !== state.navigationToken) return;
 
-        if (currentMedia && currentMedia.tagName === 'VIDEO') {
-          currentMedia.pause();
-        }
+          if (currentMedia && currentMedia.tagName === 'VIDEO') {
+            currentMedia.pause();
+          }
 
-        refreshTrackSlides();
-        ensureAdjacentSlides();
-        schedulePreloadAroundIndex(index);
+          refreshTrackSlides();
+          ensureAdjacentSlides();
+          schedulePreloadAroundIndex(index);
 
-        const trackTarget = movement > 0 ? -viewport.clientHeight : viewport.clientHeight;
-        await animateTrackTo(trackTarget, true);
-        reelTrack.classList.remove('animating');
-        reelTrack.style.transform = 'translate3d(0, 0, 0)';
+          const trackTarget = movement > 0 ? -viewport.clientHeight : viewport.clientHeight;
+          await animateTrackTo(trackTarget, true);
+          if (navigationToken !== state.navigationToken) return;
+          reelTrack.classList.remove('animating');
+          reelTrack.style.transform = 'translate3d(0, 0, 0)';
 
-        state.currentIndex = index;
-        setCurrentSlide(targetEntry.slide, targetEntry.media);
-        refreshTrackSlides();
-        updateMeta(post);
-        ensureAdjacentSlides();
-        startPlaybackForPost(post, targetEntry.media, targetEntry.slide);
-        state.animationLock = false;
+          state.currentIndex = index;
+          setCurrentSlide(targetEntry.slide, targetEntry.media);
+          refreshTrackSlides();
+          updateMeta(post);
+          ensureAdjacentSlides();
+          startPlaybackForPost(post, targetEntry.media, targetEntry.slide);
 
-        if (state.posts.length - index <= 4) {
-          loadPosts(false);
+          if (state.posts.length - index <= 4) {
+            loadPosts(false);
+          }
+        } finally {
+          if (navigationToken === state.navigationToken) {
+            state.animationLock = false;
+          }
         }
       }
 
@@ -2054,10 +2066,19 @@ function renderApp(url) {
           reelTrack.classList.add('animating');
           reelTrack.style.transform = 'translate3d(0, ' + targetY + 'px, 0)';
           return new Promise((resolve) => {
-            const done = () => {
+            let settled = false;
+            const cleanup = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(fallbackTimer);
               reelTrack.removeEventListener('transitionend', done);
               resolve();
             };
+            const done = (event) => {
+              if (event && event.target !== reelTrack) return;
+              cleanup();
+            };
+            const fallbackTimer = setTimeout(cleanup, TRACK_TRANSITION_FALLBACK_MS);
             reelTrack.addEventListener('transitionend', done, { once: true });
           });
         }
