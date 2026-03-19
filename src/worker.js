@@ -1814,7 +1814,8 @@ function renderApp(url) {
         if (!post) return;
 
         statusCard.hidden = true;
-        const direction = index > state.currentIndex ? 1 : index < state.currentIndex ? -1 : 0;
+        const previousIndex = state.currentIndex;
+        const direction = index > previousIndex ? 1 : index < previousIndex ? -1 : 0;
         const movement = options.immediate || direction === 0 ? 0 : direction;
 
         if (!state.currentSlide || options.immediate) {
@@ -1843,10 +1844,7 @@ function renderApp(url) {
           currentMedia.pause();
         }
 
-        state.currentIndex = index;
-        setCurrentSlide(targetEntry.slide, targetEntry.media);
         refreshTrackSlides();
-        updateMeta(post);
         ensureAdjacentSlides();
         schedulePreloadAroundIndex(index);
 
@@ -1854,7 +1852,12 @@ function renderApp(url) {
         await animateTrackTo(trackTarget, true);
         reelTrack.classList.remove('animating');
         reelTrack.style.transform = 'translate3d(0, 0, 0)';
+
+        state.currentIndex = index;
+        setCurrentSlide(targetEntry.slide, targetEntry.media);
         refreshTrackSlides();
+        updateMeta(post);
+        ensureAdjacentSlides();
         startPlaybackForPost(post, targetEntry.media, targetEntry.slide);
         state.animationLock = false;
 
