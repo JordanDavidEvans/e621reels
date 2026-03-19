@@ -6,6 +6,10 @@ const BASE_TAGS = ['animated'];
 const SUPPORTED_MEDIA = new Set(['webm', 'mp4', 'gif']);
 const UPSTREAM_ERROR_PREVIEW_LIMIT = 400;
 const TAG_AUTOCOMPLETE_LIMIT = 8;
+const RATIO_FILTER_TAGS = {
+  vertical: 'ratio:<1',
+  landscape: 'ratio:>1',
+};
 
 export default {
   async fetch(request) {
@@ -59,11 +63,13 @@ async function handlePosts(request, url) {
   const page = normalizePage(url.searchParams.get('page'));
   const rawTags = sanitizeTags(url.searchParams.get('tags') || '');
   const requestedRating = sanitizeRating(url.searchParams.get('rating'));
+  const requestedRatio = sanitizeRatioFilter(url.searchParams.get('ratio'));
   const apiTags = [
     mode === 'score' ? 'order:score' : 'order:rank',
     ...BASE_TAGS,
     ...rawTags,
     ...(requestedRating ? ['rating:' + requestedRating] : []),
+    ...(requestedRatio ? [RATIO_FILTER_TAGS[requestedRatio]] : []),
   ].join(' ');
 
   const upstream = new URL(E621_API);
@@ -76,6 +82,7 @@ async function handlePosts(request, url) {
     page,
     tags: rawTags,
     rating: requestedRating,
+    ratio: requestedRatio,
     upstream: upstream.toString(),
     ray: request.headers.get('cf-ray') || null,
     colo: request.cf?.colo || null,
@@ -126,6 +133,7 @@ async function handlePosts(request, url) {
       page,
       tags: rawTags,
       rating: requestedRating,
+      ratio: requestedRatio,
       posts,
       source: 'worker',
     });
@@ -243,8 +251,8 @@ function trimForLog(value) {
 
 function mapPost(post) {
   const ext = String(post.file.ext || '').toLowerCase();
-  const width = post.sample?.width || post.file?.width || 0;
-  const height = post.sample?.height || post.file?.height || 0;
+  const width = post.file?.width || post.sample?.width || 0;
+  const height = post.file?.height || post.sample?.height || 0;
   const artist = Array.isArray(post.tags?.artist) ? post.tags.artist.filter(Boolean) : [];
   const species = Array.isArray(post.tags?.species) ? post.tags.species.filter(Boolean) : [];
   const general = Array.isArray(post.tags?.general) ? post.tags.general.filter(Boolean).slice(0, 12) : [];
@@ -308,6 +316,12 @@ function renderApp(url) {
         --outline: rgba(255,255,255,0.12);
         --safe-top: max(18px, env(safe-area-inset-top));
         --safe-bottom: max(24px, env(safe-area-inset-bottom));
+        --app-height: 100dvh;
+      }
+      @supports not (height: 100dvh) {
+        :root {
+          --app-height: 100vh;
+        }
       }
       * { box-sizing: border-box; }
       html, body {
@@ -324,14 +338,14 @@ function renderApp(url) {
         font: inherit;
       }
       .shell {
-        min-height: 100vh;
+        min-height: var(--app-height);
         display: grid;
         place-items: center;
         padding: 20px;
       }
       .app {
-        width: min(430px, 100%);
-        height: min(920px, calc(100vh - 40px));
+        width: min(100%, 1240px);
+        height: min(calc(var(--app-height) - 40px), 960px);
         border: 1px solid var(--outline);
         border-radius: 32px;
         overflow: hidden;
@@ -739,13 +753,28 @@ function renderApp(url) {
         white-space: nowrap;
         border: 0;
       }
+      @media (orientation: landscape) and (max-width: 960px) {
+        .shell {
+          padding: 0;
+        }
+        .app {
+          width: 100vw;
+          height: var(--app-height);
+          border-radius: 0;
+          border: none;
+        }
+        .overlay {
+          padding-left: max(14px, env(safe-area-inset-left));
+          padding-right: max(14px, env(safe-area-inset-right));
+        }
+      }
       @media (max-width: 640px) {
         .shell {
           padding: 0;
         }
         .app {
           width: 100%;
-          height: 100vh;
+          height: var(--app-height);
           border-radius: 0;
           border: none;
         }
@@ -774,6 +803,7 @@ function renderApp(url) {
             </div>
             <div class="badge-row">
               <div class="badge" id="sortBadge">Trending</div>
+              <div class="badge" id="ratioBadge">Any aspect</div>
               <div class="counter" id="counterBadge">0 / 0</div>
             </div>
           </div>
@@ -838,19 +868,30 @@ function renderApp(url) {
               <option value="e">Explicit</option>
             </select>
           </label>
-          <label class="settings-option">
-            <input id="fitMediaToggle" name="fitMedia" type="checkbox" />
-            <span>Fit media inside the frame instead of filling/cropping it.</span>
+          <label>
+            <span>Display mode</span>
+            <select id="mediaDisplaySelect" name="displayMode">
+              <option value="contain">Show full aspect ratio</option>
+              <option value="fullscreen">Fill screen / crop</option>
+            </select>
+          </label>
+          <label>
+            <span>Aspect ratio filter</span>
+            <select id="ratioSelect" name="ratio">
+              <option value="">Any aspect ratio</option>
+              <option value="vertical">Portrait / vertical only</option>
+              <option value="landscape">Landscape only</option>
+            </select>
           </label>
           <label class="settings-option">
             <input id="hideTagsToggle" name="hideTags" type="checkbox" />
-            <span>Hide the tag pills overlay for a cleaner full-screen view.</span>
+            <span>Hide the tag pills overlay by default for a cleaner viewing area.</span>
           </label>
           <div class="filter-actions">
             <button class="primary" type="submit">Apply</button>
             <button class="secondary" id="resetButton" type="button">Reset</button>
           </div>
-          <p class="hint">Tap the current reel to pause or resume. The feed auto-swipes with animation when an image timer ends or a video finishes.</p>
+          <p class="hint">Tap the current reel to pause or resume. Images advance after 10 seconds, and short videos loop until they have been on screen for at least 10 seconds before the feed advances.</p>
         </form>
       </main>
     </div>
@@ -873,11 +914,13 @@ function renderApp(url) {
       const WHEEL_THRESHOLD = 8;
       const PRELOAD_DISTANCE = 2;
       const IMAGE_COUNTDOWN_MS = 10000;
+      const MIN_VIDEO_PLAYBACK_MS = 10000;
       const TAG_AUTOCOMPLETE_LIMIT = 8;
       const AUTOCOMPLETE_DEBOUNCE_MS = 160;
       const INITIAL_MODE = ${JSON.stringify(seo.initialModeForClient)};
       const INITIAL_TAGS = ${JSON.stringify(seo.initialTagsForClient)};
       const INITIAL_RATING = ${JSON.stringify(seo.initialRatingForClient)};
+      const INITIAL_RATIO = ${JSON.stringify(seo.initialRatioForClient)};
 
       const state = {
         posts: [],
@@ -887,12 +930,13 @@ function renderApp(url) {
         mode: INITIAL_MODE,
         tags: INITIAL_TAGS,
         rating: INITIAL_RATING,
+        ratio: INITIAL_RATIO,
         muted: true,
         timer: null,
         progressTimer: null,
         animationLock: false,
-        fitMedia: false,
-        hideTags: false,
+        fitMedia: true,
+        hideTags: true,
         touchActive: false,
         gesturePointerId: null,
         gestureSource: null,
@@ -906,6 +950,7 @@ function renderApp(url) {
         preloaded: new Map(),
         lastFeedSource: 'worker',
         suppressClickUntil: 0,
+        videoPlayback: new WeakMap(),
         tagAutocomplete: {
           items: [],
           activeIndex: -1,
@@ -929,6 +974,7 @@ function renderApp(url) {
       const nextButton = document.getElementById('nextButton');
       const previousButton = document.getElementById('previousButton');
       const sortBadge = document.getElementById('sortBadge');
+      const ratioBadge = document.getElementById('ratioBadge');
       const counterBadge = document.getElementById('counterBadge');
       const progressBar = document.getElementById('progressBar');
       const openPostLink = document.getElementById('openPostLink');
@@ -939,7 +985,8 @@ function renderApp(url) {
       const toggleFiltersButton = document.getElementById('toggleFiltersButton');
       const resetButton = document.getElementById('resetButton');
       const toggleMuteButton = document.getElementById('toggleMuteButton');
-      const fitMediaToggle = document.getElementById('fitMediaToggle');
+      const mediaDisplaySelect = document.getElementById('mediaDisplaySelect');
+      const ratioSelect = document.getElementById('ratioSelect');
       const hideTagsToggle = document.getElementById('hideTagsToggle');
       const tagAutocomplete = document.getElementById('tagAutocomplete');
       const tagAutocompleteList = document.getElementById('tagAutocompleteList');
@@ -947,6 +994,9 @@ function renderApp(url) {
       modeSelect.value = state.mode;
       tagsInput.value = state.tags;
       ratingSelect.value = state.rating;
+      mediaDisplaySelect.value = state.fitMedia ? 'contain' : 'fullscreen';
+      ratioSelect.value = state.ratio;
+      hideTagsToggle.checked = state.hideTags;
 
       toggleFiltersButton.addEventListener('click', () => {
         const nextOpen = !filterPanel.classList.contains('open');
@@ -963,7 +1013,8 @@ function renderApp(url) {
         state.mode = modeSelect.value;
         state.tags = tagsInput.value.trim();
         state.rating = ratingSelect.value;
-        state.fitMedia = fitMediaToggle.checked;
+        state.ratio = ratioSelect.value;
+        state.fitMedia = mediaDisplaySelect.value !== 'fullscreen';
         state.hideTags = hideTagsToggle.checked;
         syncDisplaySettings();
         syncUrlState();
@@ -975,13 +1026,15 @@ function renderApp(url) {
         modeSelect.value = 'trending';
         tagsInput.value = '';
         ratingSelect.value = '';
-        fitMediaToggle.checked = false;
-        hideTagsToggle.checked = false;
+        mediaDisplaySelect.value = 'contain';
+        ratioSelect.value = '';
+        hideTagsToggle.checked = true;
         state.mode = 'trending';
         state.tags = '';
         state.rating = '';
-        state.fitMedia = false;
-        state.hideTags = false;
+        state.ratio = '';
+        state.fitMedia = true;
+        state.hideTags = true;
         closeTagAutocomplete();
         syncDisplaySettings();
         syncUrlState();
@@ -1052,7 +1105,7 @@ function renderApp(url) {
           goToRelativePost(-1);
         } else if (event.key.toLowerCase() === 'f') {
           state.fitMedia = !state.fitMedia;
-          fitMediaToggle.checked = state.fitMedia;
+          mediaDisplaySelect.value = state.fitMedia ? 'contain' : 'fullscreen';
           syncDisplaySettings();
           rerenderCurrentSlide();
         } else if (event.key.toLowerCase() === 't') {
@@ -1082,6 +1135,7 @@ function renderApp(url) {
 
       function syncDisplaySettings() {
         metaBlock.classList.toggle('hidden-tags', state.hideTags);
+        ratioBadge.textContent = formatRatioBadge(state.ratio);
       }
 
       function syncUrlState() {
@@ -1090,6 +1144,7 @@ function renderApp(url) {
         if (state.mode !== 'trending') nextUrl.searchParams.set('mode', state.mode);
         if (state.tags) nextUrl.searchParams.set('tags', state.tags);
         if (state.rating) nextUrl.searchParams.set('rating', state.rating);
+        if (state.ratio) nextUrl.searchParams.set('ratio', state.ratio);
         window.history.replaceState({}, '', nextUrl.toString());
       }
 
@@ -1461,6 +1516,7 @@ function renderApp(url) {
           });
           if (state.tags) params.set('tags', state.tags);
           if (state.rating) params.set('rating', state.rating);
+          if (state.ratio) params.set('ratio', state.ratio);
 
           console.info('[feed] requesting posts', {
             sourcePreference: 'worker-first',
@@ -1468,6 +1524,7 @@ function renderApp(url) {
             mode: state.mode,
             tags: state.tags,
             rating: state.rating || null,
+            ratio: state.ratio || null,
           });
 
           const { data, source } = await fetchPostsWithFallback(params);
@@ -1574,6 +1631,7 @@ function renderApp(url) {
           page: Number(params.get('page') || '1'),
           tags: sanitizeClientTags(params.get('tags') || ''),
           rating: sanitizeClientRating(params.get('rating')),
+          ratio: sanitizeRatioFilter(params.get('ratio')),
           posts,
           source: 'client-direct',
         };
@@ -1586,7 +1644,9 @@ function renderApp(url) {
           ...sanitizeClientTags(params.get('tags') || ''),
         ];
         const rating = sanitizeClientRating(params.get('rating'));
+        const ratio = sanitizeRatioFilter(params.get('ratio'));
         if (rating) tags.push('rating:' + rating);
+        if (ratio) tags.push(ratio === 'vertical' ? 'ratio:<1' : 'ratio:>1');
         return tags.join(' ');
       }
 
@@ -1600,6 +1660,10 @@ function renderApp(url) {
 
       function sanitizeClientRating(value) {
         return ['s', 'q', 'e'].includes(value) ? value : '';
+      }
+
+      function sanitizeRatioFilter(value) {
+        return ['vertical', 'landscape'].includes(value) ? value : '';
       }
 
       function sanitizeAutocompleteQuery(value) {
@@ -1623,8 +1687,8 @@ function renderApp(url) {
           type: ['webm', 'mp4'].includes(ext) ? 'video' : 'image',
           score: (post.score && post.score.total) || 0,
           rating: post.rating || 'u',
-          width: (post.sample && post.sample.width) || (post.file && post.file.width) || 0,
-          height: (post.sample && post.sample.height) || (post.file && post.file.height) || 0,
+          width: (post.file && post.file.width) || (post.sample && post.sample.width) || 0,
+          height: (post.file && post.file.height) || (post.sample && post.sample.height) || 0,
           createdAt: post.created_at,
           mediaUrl: post.file.url,
           previewUrl: (post.preview && post.preview.url) || (post.sample && post.sample.url) || post.file.url,
@@ -1704,11 +1768,7 @@ function renderApp(url) {
       function watchVideoProgress(video) {
         clearTimers();
         const update = () => {
-          if (!video.duration || !Number.isFinite(video.duration)) {
-            setProgressValue(0);
-            return;
-          }
-          setProgressValue((video.currentTime / video.duration) * 100);
+          setProgressValue(getVideoPlaybackProgress(video) * 100);
         };
         update();
         state.progressTimer = setInterval(update, 120);
@@ -1867,7 +1927,7 @@ function renderApp(url) {
           media = document.createElement('video');
           media.src = post.mediaUrl;
           media.poster = post.previewUrl;
-          media.preload = 'auto';
+          media.preload = 'metadata';
           media.playsInline = true;
           media.loop = false;
           media.muted = state.muted;
@@ -1875,16 +1935,17 @@ function renderApp(url) {
           media.autoplay = false;
           media.className = 'reel-media' + (state.fitMedia ? ' fit' : '');
           media.addEventListener('loadeddata', () => slide.classList.remove('loading'), { once: true });
+          media.addEventListener('loadedmetadata', () => initializeVideoPlayback(media));
           media.addEventListener('ended', () => {
-            if (state.currentMedia === media) {
-              goToRelativePost(1, { animated: true });
-            }
+            handleVideoEnded(media);
           });
           media.addEventListener('play', () => {
+            markVideoPlaybackStarted(media);
             if (state.currentMedia === media) watchVideoProgress(media);
             slide.classList.remove('awaiting-play');
           });
           media.addEventListener('pause', () => {
+            finalizeVideoPlaybackChunk(media);
             if (state.currentMedia === media && !media.ended) {
               clearTimers(false);
             }
@@ -1924,8 +1985,8 @@ function renderApp(url) {
       }
 
       function startPlaybackForPost(post, media, slide) {
-        slide.classList.remove('loading');
         if (post.type === 'video') {
+          resetVideoPlayback(media);
           media.currentTime = 0;
           media.muted = state.muted;
           slide.classList.add('awaiting-play');
@@ -1936,6 +1997,7 @@ function renderApp(url) {
             clearTimers();
           });
         } else {
+          slide.classList.remove('loading');
           scheduleImageAdvance();
         }
       }
@@ -2001,6 +2063,86 @@ function renderApp(url) {
         return Promise.resolve();
       }
 
+      function initializeVideoPlayback(video) {
+        const existing = state.videoPlayback.get(video) || {};
+        state.videoPlayback.set(video, {
+          totalMs: existing.totalMs || 0,
+          startedAt: existing.startedAt ?? null,
+          targetMs: Math.max((Number.isFinite(video.duration) ? video.duration : 0) * 1000, existing.targetMs || 0, MIN_VIDEO_PLAYBACK_MS),
+        });
+      }
+
+      function resetVideoPlayback(video) {
+        initializeVideoPlayback(video);
+        const playback = state.videoPlayback.get(video);
+        if (!playback) return;
+        playback.totalMs = 0;
+        playback.startedAt = null;
+      }
+
+      function markVideoPlaybackStarted(video) {
+        initializeVideoPlayback(video);
+        const playback = state.videoPlayback.get(video);
+        if (playback && playback.startedAt === null) {
+          playback.startedAt = Date.now();
+        }
+      }
+
+      function finalizeVideoPlaybackChunk(video) {
+        const playback = state.videoPlayback.get(video);
+        if (!playback || playback.startedAt === null) return;
+        playback.totalMs += Math.max(0, Date.now() - playback.startedAt);
+        playback.startedAt = null;
+      }
+
+      function getVideoPlaybackProgress(video) {
+        initializeVideoPlayback(video);
+        const playback = state.videoPlayback.get(video);
+        if (!playback) return 0;
+        const activeMs = playback.startedAt === null ? 0 : Math.max(0, Date.now() - playback.startedAt);
+        return Math.max(0, Math.min(1, (playback.totalMs + activeMs) / playback.targetMs));
+      }
+
+      function handleVideoEnded(video) {
+        finalizeVideoPlaybackChunk(video);
+        const playback = state.videoPlayback.get(video);
+        if (!playback) return;
+        if (playback.totalMs + 50 < playback.targetMs) {
+          video.currentTime = 0;
+          video.play().catch(() => {
+            if (state.currentMedia === video) {
+              clearTimers(false);
+            }
+          });
+          return;
+        }
+        if (state.currentMedia === video) {
+          goToRelativePost(1, { animated: true });
+        }
+      }
+
+      function formatRatioBadge(ratio) {
+        if (ratio === 'vertical') return 'Vertical only';
+        if (ratio === 'landscape') return 'Landscape only';
+        return 'Any aspect';
+      }
+
+      function handleViewportResize() {
+        const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        document.documentElement.style.setProperty('--app-height', height + 'px');
+        if (state.currentSlide) {
+          animateTrackTo(0, false);
+          refreshTrackSlides();
+        }
+      }
+
+      window.addEventListener('resize', handleViewportResize);
+      window.addEventListener('orientationchange', handleViewportResize);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', handleViewportResize);
+      }
+
+      handleViewportResize();
       syncDisplaySettings();
       restartFeed();
     </script>
@@ -2013,6 +2155,7 @@ function buildSeo(url) {
   const mode = url.searchParams.get('mode') === 'score' ? 'score' : 'trending';
   const tags = sanitizeTags(url.searchParams.get('tags') || '');
   const rating = sanitizeRating(url.searchParams.get('rating'));
+  const ratio = sanitizeRatioFilter(url.searchParams.get('ratio'));
   const canonical = new URL(url.toString());
   canonical.protocol = 'https:';
   canonical.host = 'furryreel.com';
@@ -2023,17 +2166,19 @@ function buildSeo(url) {
   if (mode !== 'trending') canonical.searchParams.set('mode', mode);
   if (tags.length) canonical.searchParams.set('tags', tags.join(' '));
   if (rating) canonical.searchParams.set('rating', rating);
+  if (ratio) canonical.searchParams.set('ratio', ratio);
 
   const humanTags = tags.map(formatTagLabel);
   const modeLabel = mode === 'score' ? 'top scored' : 'trending';
   const ratingLabel = rating ? `Rated ${rating.toUpperCase()}` : 'All ratings';
+  const ratioLabel = ratio === 'vertical' ? 'portrait / vertical only' : ratio === 'landscape' ? 'landscape only' : 'any aspect ratio';
   const titleParts = [];
   if (humanTags.length) titleParts.push(humanTags.join(', '));
   titleParts.push(mode === 'score' ? 'Top scored furry reels' : 'Trending furry reels');
   const title = titleParts.join(' • ') + ' | FurryReel';
   const description = humanTags.length
-    ? `Browse ${modeLabel} animated furry reels for ${humanTags.join(', ')} on FurryReel. Swipe through indexed video posts, GIFs, and image previews with ${ratingLabel.toLowerCase()}.`
-    : `Browse ${modeLabel} animated furry reels on FurryReel. Explore indexable e621-powered video posts, GIFs, and image previews built for fast swiping on furryreel.com.`;
+    ? `Browse ${modeLabel} animated furry reels for ${humanTags.join(', ')} on FurryReel. Swipe through indexed video posts, GIFs, and image previews with ${ratingLabel.toLowerCase()} and ${ratioLabel}.`
+    : `Browse ${modeLabel} animated furry reels on FurryReel. Explore indexable e621-powered video posts, GIFs, and image previews built for fast swiping on furryreel.com with ${ratioLabel}.`;
   const heading = humanTags.length
     ? `${humanTags.join(', ')} furry reels`
     : 'FurryReel animated furry feed';
@@ -2048,6 +2193,7 @@ function buildSeo(url) {
     initialModeForClient: mode,
     initialTagsForClient: tags.join(' '),
     initialRatingForClient: rating,
+    initialRatioForClient: ratio,
     structuredData: {
       '@context': 'https://schema.org',
       '@type': 'CollectionPage',
@@ -2140,6 +2286,10 @@ function sanitizeTags(raw) {
 
 function sanitizeRating(raw) {
   return ['s', 'q', 'e'].includes(raw) ? raw : '';
+}
+
+function sanitizeRatioFilter(raw) {
+  return ['vertical', 'landscape'].includes(raw) ? raw : '';
 }
 
 function sanitizeAutocompleteQuery(raw) {
