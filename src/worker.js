@@ -359,6 +359,9 @@ function renderApp(url) {
         inset: 0;
         overflow: hidden;
         background: #000;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
       }
       .reel-track {
         position: absolute;
@@ -374,6 +377,8 @@ function renderApp(url) {
         inset: 0;
         background: #000;
         overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
       }
       .reel-slide.placeholder {
         display: grid;
@@ -557,13 +562,25 @@ function renderApp(url) {
         top: 0;
         left: 0;
         right: 0;
-        height: 4px;
-        background: rgba(255,255,255,0.08);
+        height: 32px;
         z-index: 4;
         touch-action: none;
+        cursor: ew-resize;
+      }
+      .progress::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 4px;
+        background: rgba(255,255,255,0.08);
       }
       .progress > div {
-        height: 100%;
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 4px;
         width: 0;
         background: linear-gradient(90deg, #ff59a0 0%, #ffd36b 100%);
         transition: width 100ms linear;
@@ -589,6 +606,11 @@ function renderApp(url) {
       .time-indicator-speed {
         color: #ffd36b;
         font-weight: 600;
+      }
+      .reel-media,
+      .overlay {
+        user-select: none;
+        -webkit-user-select: none;
       }
       .settings-toggle {
         position: absolute;
@@ -1218,7 +1240,7 @@ function renderApp(url) {
         state.pointerDeltaX = 0;
         state.dragLocked = false;
         reelTrack.classList.remove('animating');
-        scheduleSpeedHold(source, state.gesturePointerId);
+        scheduleSpeedHold(source, state.gesturePointerId, event.target);
         return true;
       }
 
@@ -1268,6 +1290,7 @@ function renderApp(url) {
       function handlePointerDown(event) {
         if (event.pointerType === 'mouse' && event.button !== 0) return;
         if (!beginGesture(event, 'pointer', event)) return;
+        event.preventDefault();
         if (typeof appRoot.setPointerCapture === 'function') {
           try {
             appRoot.setPointerCapture(event.pointerId);
@@ -1318,7 +1341,9 @@ function renderApp(url) {
 
       function handleTouchStart(event) {
         if (!event.changedTouches.length) return;
-        beginGesture(event.changedTouches[0], 'touch', event);
+        if (beginGesture(event.changedTouches[0], 'touch', event)) {
+          event.preventDefault();
+        }
       }
 
       function handleTouchMove(event) {
@@ -1861,9 +1886,10 @@ function renderApp(url) {
         }
       }
 
-      function scheduleSpeedHold(source, pointerId) {
+      function scheduleSpeedHold(source, pointerId, target) {
         cancelSpeedHoldCandidate();
         if (!state.currentMedia || state.currentMedia.tagName !== 'VIDEO') return;
+        if (!viewport.contains(target)) return;
         state.speedHold.pointerId = pointerId;
         state.speedHold.source = source;
         state.speedHold.video = state.currentMedia;
