@@ -359,6 +359,9 @@ function renderApp(url) {
         inset: 0;
         overflow: hidden;
         background: #000;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
       }
       .reel-track {
         position: absolute;
@@ -374,6 +377,8 @@ function renderApp(url) {
         inset: 0;
         background: #000;
         overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
       }
       .reel-slide.placeholder {
         display: grid;
@@ -557,15 +562,55 @@ function renderApp(url) {
         top: 0;
         left: 0;
         right: 0;
+        height: 32px;
+        z-index: 4;
+        touch-action: none;
+        cursor: ew-resize;
+      }
+      .progress::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
         height: 4px;
         background: rgba(255,255,255,0.08);
-        z-index: 4;
       }
       .progress > div {
-        height: 100%;
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 4px;
         width: 0;
         background: linear-gradient(90deg, #ff59a0 0%, #ffd36b 100%);
         transition: width 100ms linear;
+      }
+      .time-indicator {
+        position: absolute;
+        top: calc(var(--safe-top) + 16px);
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 6;
+        border: 1px solid var(--outline);
+        background: rgba(8, 8, 12, 0.7);
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 0.82rem;
+        letter-spacing: 0.01em;
+        backdrop-filter: blur(16px);
+        pointer-events: none;
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .time-indicator-speed {
+        color: #ffd36b;
+        font-weight: 600;
+      }
+      .reel-media,
+      .overlay {
+        user-select: none;
+        -webkit-user-select: none;
       }
       .settings-toggle {
         position: absolute;
@@ -790,7 +835,11 @@ function renderApp(url) {
         <ul>${landingLinks}</ul>
       </section>
       <main class="app" id="appRoot">
-        <div class="progress"><div id="progressBar"></div></div>
+        <div class="progress" id="progressTrack"><div id="progressBar"></div></div>
+        <div class="time-indicator" id="timeIndicator" hidden>
+          <span class="time-indicator-speed" id="timeIndicatorSpeed"></span>
+          <span id="timeIndicatorText">0:00 / 0:00</span>
+        </div>
         <div class="viewport" id="viewport">
           <div class="reel-track" id="reelTrack"></div>
         </div>
@@ -954,6 +1003,20 @@ function renderApp(url) {
         lastFeedSource: 'worker',
         suppressClickUntil: 0,
         videoPlayback: new WeakMap(),
+        scrub: {
+          active: false,
+          pointerId: null,
+          source: null,
+          video: null,
+          wasPlaying: false,
+        },
+        speedHold: {
+          active: false,
+          timer: null,
+          pointerId: null,
+          source: null,
+          video: null,
+        },
         tagAutocomplete: {
           items: [],
           activeIndex: -1,
@@ -980,6 +1043,10 @@ function renderApp(url) {
       const ratioBadge = document.getElementById('ratioBadge');
       const counterBadge = document.getElementById('counterBadge');
       const progressBar = document.getElementById('progressBar');
+      const progressTrack = document.getElementById('progressTrack');
+      const timeIndicator = document.getElementById('timeIndicator');
+      const timeIndicatorText = document.getElementById('timeIndicatorText');
+      const timeIndicatorSpeed = document.getElementById('timeIndicatorSpeed');
       const openPostLink = document.getElementById('openPostLink');
       const modeSelect = document.getElementById('modeSelect');
       const tagsInput = document.getElementById('tagsInput');
@@ -1130,6 +1197,8 @@ function renderApp(url) {
       appRoot.addEventListener('touchend', handleTouchEnd, { passive: false, capture: true });
       appRoot.addEventListener('touchcancel', cancelPointerGesture, { passive: false, capture: true });
       appRoot.addEventListener('wheel', handleWheel, { passive: false });
+      progressTrack.addEventListener('pointerdown', handleProgressPointerDown, { capture: true });
+      progressTrack.addEventListener('touchstart', handleProgressTouchStart, { passive: false, capture: true });
 
       function closeSettings() {
         filterPanel.classList.remove('open');
@@ -1154,6 +1223,7 @@ function renderApp(url) {
       function shouldIgnoreGestureTarget(target) {
         if (!target) return false;
         if (filterPanel.classList.contains('open') && filterPanel.contains(target)) return true;
+        if (progressTrack.contains(target)) return true;
         return Boolean(target.closest('button, a, input, select, option, label, textarea, [data-tag-name]'));
       }
 
@@ -1170,6 +1240,7 @@ function renderApp(url) {
         state.pointerDeltaX = 0;
         state.dragLocked = false;
         reelTrack.classList.remove('animating');
+        scheduleSpeedHold(source, state.gesturePointerId, event.target);
         return true;
       }
 
@@ -1177,6 +1248,9 @@ function renderApp(url) {
         if (!state.touchActive || state.animationLock) return false;
         state.pointerDeltaY = point.clientY - state.pointerStartY;
         state.pointerDeltaX = point.clientX - state.pointerStartX;
+        if (Math.abs(state.pointerDeltaY) > DRAG_LOCK_THRESHOLD || Math.abs(state.pointerDeltaX) > DRAG_LOCK_THRESHOLD) {
+          cancelSpeedHoldCandidate();
+        }
         if (!state.dragLocked) {
           if (Math.abs(state.pointerDeltaY) < DRAG_LOCK_THRESHOLD) return false;
           if (Math.abs(state.pointerDeltaX) > Math.abs(state.pointerDeltaY)) {
@@ -1191,12 +1265,32 @@ function renderApp(url) {
 
       function endGesture() {
         if (!state.touchActive) return;
+        stopSpeedHold();
         finalizeSwipe(state.pointerDeltaY, state.dragLocked);
+      }
+
+      function handleProgressPointerDown(event) {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        if (!startVideoScrub(event, 'pointer', event.pointerId)) return;
+        if (typeof progressTrack.setPointerCapture === 'function') {
+          try {
+            progressTrack.setPointerCapture(event.pointerId);
+          } catch (error) {
+            console.warn('Progress pointer capture failed', error);
+          }
+        }
+      }
+
+      function handleProgressTouchStart(event) {
+        if (!event.changedTouches.length) return;
+        const touch = event.changedTouches[0];
+        startVideoScrub(touch, 'touch', touch.identifier);
       }
 
       function handlePointerDown(event) {
         if (event.pointerType === 'mouse' && event.button !== 0) return;
         if (!beginGesture(event, 'pointer', event)) return;
+        event.preventDefault();
         if (typeof appRoot.setPointerCapture === 'function') {
           try {
             appRoot.setPointerCapture(event.pointerId);
@@ -1207,6 +1301,12 @@ function renderApp(url) {
       }
 
       function handlePointerMove(event) {
+        if (state.scrub.active && state.scrub.source === 'pointer') {
+          if (state.scrub.pointerId !== null && event.pointerId !== state.scrub.pointerId) return;
+          updateVideoScrub(event);
+          event.preventDefault();
+          return;
+        }
         if (!state.touchActive || state.gestureSource !== 'pointer') return;
         if (state.gesturePointerId !== null && event.pointerId !== state.gesturePointerId) return;
         if (updateGesture(event)) {
@@ -1215,6 +1315,18 @@ function renderApp(url) {
       }
 
       function handlePointerUp(event) {
+        if (state.scrub.active && state.scrub.source === 'pointer') {
+          if (state.scrub.pointerId !== null && event.pointerId !== state.scrub.pointerId) return;
+          if (typeof progressTrack.releasePointerCapture === 'function') {
+            try {
+              progressTrack.releasePointerCapture(event.pointerId);
+            } catch (error) {
+              console.warn('Progress pointer release failed', error);
+            }
+          }
+          finishVideoScrub();
+          return;
+        }
         if (!state.touchActive || state.gestureSource !== 'pointer') return;
         if (state.gesturePointerId !== null && event.pointerId !== state.gesturePointerId) return;
         if (typeof appRoot.releasePointerCapture === 'function') {
@@ -1229,12 +1341,21 @@ function renderApp(url) {
 
       function handleTouchStart(event) {
         if (!event.changedTouches.length) return;
-        beginGesture(event.changedTouches[0], 'touch', event);
+        if (beginGesture(event.changedTouches[0], 'touch', event)) {
+          event.preventDefault();
+        }
       }
 
       function handleTouchMove(event) {
+        if (state.scrub.active && state.scrub.source === 'touch') {
+          const touch = findActiveTouch(event.changedTouches, state.scrub.pointerId);
+          if (!touch) return;
+          updateVideoScrub(touch);
+          event.preventDefault();
+          return;
+        }
         if (!state.touchActive || state.gestureSource !== 'touch') return;
-        const touch = findActiveTouch(event.changedTouches);
+        const touch = findActiveTouch(event.changedTouches, state.gesturePointerId);
         if (!touch) return;
         if (updateGesture(touch)) {
           event.preventDefault();
@@ -1242,16 +1363,23 @@ function renderApp(url) {
       }
 
       function handleTouchEnd(event) {
+        if (state.scrub.active && state.scrub.source === 'touch') {
+          const touch = findActiveTouch(event.changedTouches, state.scrub.pointerId);
+          if (!touch) return;
+          event.preventDefault();
+          finishVideoScrub();
+          return;
+        }
         if (!state.touchActive || state.gestureSource !== 'touch') return;
-        const touch = findActiveTouch(event.changedTouches);
+        const touch = findActiveTouch(event.changedTouches, state.gesturePointerId);
         if (!touch) return;
         event.preventDefault();
         endGesture();
       }
 
-      function findActiveTouch(touchList) {
+      function findActiveTouch(touchList, activeId) {
         for (const touch of touchList) {
-          if (state.gesturePointerId === null || touch.identifier === state.gesturePointerId) {
+          if (activeId === null || touch.identifier === activeId) {
             return touch;
           }
         }
@@ -1259,6 +1387,9 @@ function renderApp(url) {
       }
 
       function cancelPointerGesture() {
+        finishVideoScrub();
+        stopSpeedHold();
+        cancelSpeedHoldCandidate();
         if (!state.touchActive) return;
         finalizeSwipe(0, false);
       }
@@ -1755,6 +1886,118 @@ function renderApp(url) {
         }
       }
 
+      function scheduleSpeedHold(source, pointerId, target) {
+        cancelSpeedHoldCandidate();
+        if (!state.currentMedia || state.currentMedia.tagName !== 'VIDEO') return;
+        if (!viewport.contains(target)) return;
+        state.speedHold.pointerId = pointerId;
+        state.speedHold.source = source;
+        state.speedHold.video = state.currentMedia;
+        state.speedHold.timer = setTimeout(() => {
+          activateSpeedHold();
+        }, 170);
+      }
+
+      function cancelSpeedHoldCandidate() {
+        if (state.speedHold.timer) {
+          clearTimeout(state.speedHold.timer);
+          state.speedHold.timer = null;
+        }
+      }
+
+      function activateSpeedHold() {
+        cancelSpeedHoldCandidate();
+        const video = state.speedHold.video;
+        if (!video || state.currentMedia !== video || video.tagName !== 'VIDEO') return;
+        state.speedHold.active = true;
+        video.playbackRate = 2;
+        showTimeIndicator(video, '2×');
+      }
+
+      function stopSpeedHold() {
+        cancelSpeedHoldCandidate();
+        if (!state.speedHold.active) return;
+        const video = state.speedHold.video;
+        if (video && video.tagName === 'VIDEO') {
+          video.playbackRate = 1;
+        }
+        state.speedHold.active = false;
+        state.suppressClickUntil = Date.now() + 220;
+        hideTimeIndicator();
+      }
+
+      function startVideoScrub(point, source, pointerId) {
+        const video = state.currentMedia;
+        if (!video || video.tagName !== 'VIDEO' || !Number.isFinite(video.duration) || video.duration <= 0) return false;
+        state.suppressClickUntil = Date.now() + 250;
+        cancelPointerGesture();
+        clearTimers(false);
+        state.scrub.active = true;
+        state.scrub.pointerId = pointerId;
+        state.scrub.source = source;
+        state.scrub.video = video;
+        state.scrub.wasPlaying = !video.paused;
+        video.pause();
+        updateVideoScrub(point);
+        return true;
+      }
+
+      function updateVideoScrub(point) {
+        const video = state.scrub.video;
+        if (!state.scrub.active || !video) return;
+        const rect = progressTrack.getBoundingClientRect();
+        const raw = rect.width ? (point.clientX - rect.left) / rect.width : 0;
+        const ratio = Math.max(0, Math.min(1, raw));
+        video.currentTime = ratio * video.duration;
+        setProgressValue(ratio * 100);
+        showTimeIndicator(video, 'Scrub');
+      }
+
+      function finishVideoScrub() {
+        if (!state.scrub.active) return;
+        const video = state.scrub.video;
+        const wasPlaying = state.scrub.wasPlaying;
+        state.scrub.active = false;
+        state.scrub.pointerId = null;
+        state.scrub.source = null;
+        state.scrub.video = null;
+        state.scrub.wasPlaying = false;
+        hideTimeIndicator();
+        if (!video) return;
+        if (state.currentMedia === video) {
+          if (wasPlaying) {
+            video.play().then(() => watchVideoProgress(video)).catch(() => clearTimers(false));
+          } else {
+            watchVideoProgress(video);
+          }
+        }
+      }
+
+      function showTimeIndicator(video, prefix = '') {
+        if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+        timeIndicatorSpeed.textContent = prefix;
+        timeIndicatorSpeed.hidden = !prefix;
+        timeIndicatorText.textContent = formatDuration(video.currentTime) + ' / ' + formatDuration(video.duration);
+        timeIndicator.hidden = false;
+      }
+
+      function hideTimeIndicator() {
+        if (state.scrub.active || state.speedHold.active) return;
+        timeIndicator.hidden = true;
+      }
+
+      function formatDuration(seconds) {
+        const value = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+        const total = Math.floor(value);
+        const hrs = Math.floor(total / 3600);
+        const mins = Math.floor((total % 3600) / 60);
+        const secs = total % 60;
+        if (hrs > 0) {
+          return hrs + ':' + String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+        }
+        return mins + ':' + String(secs).padStart(2, '0');
+      }
+
       function scheduleImageAdvance() {
         clearTimers();
         const startedAt = Date.now();
@@ -1772,6 +2015,11 @@ function renderApp(url) {
         clearTimers();
         const update = () => {
           setProgressValue(getVideoPlaybackProgress(video) * 100);
+          if (state.scrub.active && state.scrub.video === video) {
+            showTimeIndicator(video, 'Scrub');
+          } else if (state.speedHold.active && state.speedHold.video === video) {
+            showTimeIndicator(video, '2×');
+          }
         };
         update();
         state.progressTimer = setInterval(update, 120);
@@ -2000,8 +2248,11 @@ function renderApp(url) {
       }
 
       function startPlaybackForPost(post, media, slide) {
+        stopSpeedHold();
+        finishVideoScrub();
         if (post.type === 'video') {
           resetVideoPlayback(media);
+          media.playbackRate = 1;
           media.currentTime = 0;
           media.muted = state.muted;
           slide.classList.add('awaiting-play');
@@ -2128,6 +2379,7 @@ function renderApp(url) {
       }
 
       function handleVideoEnded(video) {
+        stopSpeedHold();
         finalizeVideoPlaybackChunk(video);
         const playback = state.videoPlayback.get(video);
         if (!playback) return;
